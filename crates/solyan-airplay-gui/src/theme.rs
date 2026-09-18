@@ -14,7 +14,7 @@ pub const RED: Color32 = Color32::from_rgb(239, 99, 99);
 pub const BLUE: Color32 = Color32::from_rgb(95, 164, 255);
 
 pub fn apply(ctx: &egui::Context) {
-    let mut style = (*ctx.style()).clone();
+    ctx.set_theme(egui::Theme::Dark);\n    let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
     style.spacing.item_spacing = egui::vec2(10.0, 10.0);
     style.spacing.button_padding = egui::vec2(14.0, 9.0);
     style.spacing.slider_width = 220.0;
@@ -39,7 +39,7 @@ pub fn apply(ctx: &egui::Context) {
     visuals.widgets.open.bg_fill = CARD_HOVER;
     style.visuals = visuals;
 
-    ctx.set_style(style);
+    ctx.set_style_of(egui::Theme::Dark, style);
 }
 
 pub fn card() -> Frame {
