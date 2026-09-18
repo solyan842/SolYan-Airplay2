@@ -1,0 +1,13 @@
+[package]
+name = "solyan-airplay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+airplay-core = { path = "../airplay-core" }
+audio-capture = { path = "../audio-capture" }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
