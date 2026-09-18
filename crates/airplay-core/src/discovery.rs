@@ -4,6 +4,7 @@ use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct AirPlayReceiver {
+    pub id: String,
     pub name: String,
     pub model: String,
     pub port: u16,
@@ -25,6 +26,7 @@ pub async fn discover_once(timeout: Duration) -> Result<Vec<AirPlayReceiver>> {
     Ok(devices
         .into_iter()
         .map(|d| {
+            let id = d.id.to_mac_string();
             let supports_airplay2 = d.supports_airplay2();
             let supports_ptp = d.supports_ptp();
             let supports_audio = d.features.supports_audio();
@@ -38,6 +40,7 @@ pub async fn discover_once(timeout: Duration) -> Result<Vec<AirPlayReceiver>> {
             let addresses = d.addresses.iter().map(ToString::to_string).collect();
 
             AirPlayReceiver {
+                id,
                 name: d.name,
                 model: d.model,
                 port: d.port,
