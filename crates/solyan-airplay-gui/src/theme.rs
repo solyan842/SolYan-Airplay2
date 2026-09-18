@@ -14,7 +14,8 @@ pub const RED: Color32 = Color32::from_rgb(239, 99, 99);
 pub const BLUE: Color32 = Color32::from_rgb(95, 164, 255);
 
 pub fn apply(ctx: &egui::Context) {
-    ctx.set_theme(egui::Theme::Dark);\n    let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
+    ctx.set_theme(egui::Theme::Dark);
+    let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
     style.spacing.item_spacing = egui::vec2(10.0, 10.0);
     style.spacing.button_padding = egui::vec2(14.0, 9.0);
     style.spacing.slider_width = 220.0;
