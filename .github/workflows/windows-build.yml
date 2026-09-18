@@ -3,8 +3,10 @@ name: Windows build
 on:
   push:
     branches: [main, "dev/**"]
-  pull_request:
-    branches: [main]
+
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
