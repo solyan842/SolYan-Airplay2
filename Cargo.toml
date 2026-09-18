@@ -1,0 +1,21 @@
+[workspace]
+members = [
+  "crates/solyan-airplay-cli",
+  "crates/airplay-core",
+  "crates/audio-capture",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["SolYan"]
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+mdns-sd = "0.13"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
