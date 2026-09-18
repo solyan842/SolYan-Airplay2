@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/solyan-airplay-cli",
+  "crates/solyan-airplay-gui",
   "crates/airplay-core",
   "crates/audio-capture",
 ]
@@ -8,7 +9,7 @@ exclude = ["vendor/airplay-audio"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 license = "GPL-3.0-or-later"
 authors = ["SolYan"]
