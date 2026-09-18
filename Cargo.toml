@@ -9,13 +9,14 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
+license = "GPL-3.0-or-later"
 authors = ["SolYan"]
 
 [workspace.dependencies]
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
-mdns-sd = "0.13"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+thiserror = "1"
+crossbeam-channel = "0.5"
