@@ -4,6 +4,7 @@ members = [
   "crates/airplay-core",
   "crates/audio-capture",
 ]
+exclude = ["vendor/airplay-audio"]
 resolver = "2"
 
 [workspace.package]
@@ -20,3 +21,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 thiserror = "1"
 crossbeam-channel = "0.5"
+
+[patch."https://github.com/lmcgartland/airplay2-rs"]
+airplay-audio = { path = "vendor/airplay-audio" }
