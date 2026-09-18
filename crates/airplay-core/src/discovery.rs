@@ -24,22 +24,33 @@ pub async fn discover_once(timeout: Duration) -> Result<Vec<AirPlayReceiver>> {
 
     Ok(devices
         .into_iter()
-        .map(|d| AirPlayReceiver {
-            name: d.name,
-            model: d.model,
-            port: d.port,
-            addresses: d.addresses.into_iter().map(|ip| ip.to_string()).collect(),
-            source_version: format!(
+        .map(|d| {
+            let supports_airplay2 = d.supports_airplay2();
+            let supports_ptp = d.supports_ptp();
+            let supports_audio = d.features.supports_audio();
+            let supports_buffered_audio = d.features.supports_buffered_audio();
+            let supports_transient_pairing = d.features.supports_transient_pairing();
+            let features_raw = d.features.raw();
+            let source_version = format!(
                 "{}.{}.{}",
                 d.source_version.major, d.source_version.minor, d.source_version.patch
-            ),
-            features_raw: d.features.raw(),
-            supports_audio: d.features.supports_audio(),
-            supports_airplay2: d.supports_airplay2(),
-            supports_ptp: d.supports_ptp(),
-            supports_buffered_audio: d.features.supports_buffered_audio(),
-            supports_transient_pairing: d.features.supports_transient_pairing(),
-            requires_password: d.requires_password,
+            );
+            let addresses = d.addresses.iter().map(ToString::to_string).collect();
+
+            AirPlayReceiver {
+                name: d.name,
+                model: d.model,
+                port: d.port,
+                addresses,
+                source_version,
+                features_raw,
+                supports_audio,
+                supports_airplay2,
+                supports_ptp,
+                supports_buffered_audio,
+                supports_transient_pairing,
+                requires_password: d.requires_password,
+            }
         })
         .collect())
 }
