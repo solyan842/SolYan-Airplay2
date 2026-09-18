@@ -1,0 +1,23 @@
+name: Windows build
+
+on:
+  push:
+    branches: [main, "dev/**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check workspace
+        run: cargo check --workspace --all-targets
+      - name: Build release CLI
+        run: cargo build --release -p solyan-airplay
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: SolYan-AirPlay2-Windows
+          path: target/release/solyan-airplay.exe
