@@ -1,40 +1,45 @@
+use airplay2_discovery::{Discovery, ServiceBrowser};
 use anyhow::Result;
-use mdns_sd::{ServiceDaemon, ServiceEvent};
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct AirPlayReceiver {
-    pub fullname: String,
-    pub hostname: String,
+    pub name: String,
+    pub model: String,
     pub port: u16,
     pub addresses: Vec<String>,
+    pub source_version: String,
+    pub features_raw: u64,
+    pub supports_audio: bool,
+    pub supports_airplay2: bool,
+    pub supports_ptp: bool,
+    pub supports_buffered_audio: bool,
+    pub supports_transient_pairing: bool,
+    pub requires_password: bool,
 }
 
-pub fn discover_once(timeout: Duration) -> Result<Vec<AirPlayReceiver>> {
-    let mdns = ServiceDaemon::new()?;
-    let rx = mdns.browse("_airplay._tcp.local.")?;
-    let deadline = std::time::Instant::now() + timeout;
-    let mut out = Vec::new();
+pub async fn discover_once(timeout: Duration) -> Result<Vec<AirPlayReceiver>> {
+    let browser = ServiceBrowser::new()?;
+    let devices = browser.scan(timeout).await?;
 
-    while std::time::Instant::now() < deadline {
-        match rx.recv_timeout(Duration::from_millis(250)) {
-            Ok(ServiceEvent::ServiceResolved(info)) => {
-                let receiver = AirPlayReceiver {
-                    fullname: info.get_fullname().to_string(),
-                    hostname: info.get_hostname().to_string(),
-                    port: info.get_port(),
-                    addresses: info.get_addresses().iter().map(ToString::to_string).collect(),
-                };
-                if !out.iter().any(|x: &AirPlayReceiver| x.fullname == receiver.fullname) {
-                    out.push(receiver);
-                }
-            }
-            Ok(_) => {}
-            Err(_) => {}
-        }
-    }
-
-    let _ = mdns.stop_browse("_airplay._tcp.local.");
-    let _ = mdns.shutdown();
-    Ok(out)
+    Ok(devices
+        .into_iter()
+        .map(|d| AirPlayReceiver {
+            name: d.name,
+            model: d.model,
+            port: d.port,
+            addresses: d.addresses.into_iter().map(|ip| ip.to_string()).collect(),
+            source_version: format!(
+                "{}.{}.{}",
+                d.source_version.major, d.source_version.minor, d.source_version.patch
+            ),
+            features_raw: d.features.raw(),
+            supports_audio: d.features.supports_audio(),
+            supports_airplay2: d.supports_airplay2(),
+            supports_ptp: d.supports_ptp(),
+            supports_buffered_audio: d.features.supports_buffered_audio(),
+            supports_transient_pairing: d.features.supports_transient_pairing(),
+            requires_password: d.requires_password,
+        })
+        .collect())
 }
