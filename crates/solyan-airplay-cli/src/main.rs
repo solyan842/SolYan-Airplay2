@@ -1,7 +1,7 @@
 use anyhow::Result;
 use audio_capture::{start_default_loopback, AudioFormat};
 use solyan_airplay_core::discovery::discover_once;
-use solyan_airplay_core::session::connect_test;
+use solyan_airplay_core::session::{connect_test, stream_test};
 use std::time::{Duration, Instant};
 
 #[tokio::main]
@@ -13,7 +13,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    println!("SolYan AirPlay2 v0.1.1");
+    println!("SolYan AirPlay2 v0.1.2");
 
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
@@ -21,6 +21,10 @@ async fn main() -> Result<()> {
         Some("--connect-test") => {
             let selector = args.get(2).map(String::as_str);
             session_test(selector).await
+        }
+        Some("--stream-test") => {
+            let selector = args.get(2).map(String::as_str);
+            live_stream_test(selector).await
         }
         Some("--help") | Some("-h") => {
             print_help();
@@ -82,9 +86,50 @@ async fn session_test(selector: Option<&str>) -> Result<()> {
     println!("  device: {}", result.name);
     println!("  model: {}", result.model);
     println!("  address: {}", result.address);
-    println!("  AirPlay 2 buffered advertised: {}", yes_no(result.supports_airplay2));
+    println!(
+        "  AirPlay 2 buffered advertised: {}",
+        yes_no(result.supports_airplay2)
+    );
     println!("  PTP advertised: {}", yes_no(result.supports_ptp));
     println!("RESULT: pairing + encrypted RTSP SETUP + TEARDOWN succeeded.");
+    Ok(())
+}
+
+async fn live_stream_test(selector: Option<&str>) -> Result<()> {
+    println!("Testing live Windows audio -> HomePod over AirPlay...");
+    println!("Play audio on the PC now. The stream test runs for 10 seconds.");
+    if let Some(selector) = selector {
+        println!("Receiver selector: {selector}");
+    }
+
+    let result = stream_test(
+        selector,
+        Duration::from_secs(4),
+        Duration::from_secs(20),
+        Duration::from_secs(10),
+    )
+    .await?;
+
+    println!("Stream completed:");
+    println!("  device: {}", result.session.name);
+    println!("  model: {}", result.session.model);
+    println!("  address: {}", result.session.address);
+    println!("  prebuffer chunks: {}", result.prebuffer_chunks);
+    println!("  live chunks sent: {}", result.sent_chunks);
+    println!("  live chunks dropped: {}", result.dropped_chunks);
+    println!(
+        "  measured test duration: {:.2}s",
+        result.stream_duration.as_secs_f64()
+    );
+
+    if result.sent_chunks == 0 {
+        println!("RESULT: session connected, but no live PCM chunks were sent.");
+    } else if result.dropped_chunks == 0 {
+        println!("RESULT: live PCM -> ALAC -> encrypted AirPlay RTP completed with no queue drops.");
+    } else {
+        println!("RESULT: live AirPlay stream completed with queue drops; inspect timing/buffer settings.");
+    }
+
     Ok(())
 }
 
@@ -131,7 +176,9 @@ fn print_help() {
     println!("  solyan-airplay.exe --capture-test");
     println!("      Capture Windows system audio for five seconds.");
     println!("  solyan-airplay.exe --connect-test [name-or-ip]");
-    println!("      Perform a real AirPlay 2 pairing/session SETUP and TEARDOWN.");
+    println!("      Perform a real AirPlay pairing/session SETUP and TEARDOWN.");
+    println!("  solyan-airplay.exe --stream-test [name-or-ip]");
+    println!("      Capture Windows audio and stream it to HomePod for ten seconds.");
 }
 
 fn yes_no(v: bool) -> &'static str {
