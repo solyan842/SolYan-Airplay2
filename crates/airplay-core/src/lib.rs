@@ -1,4 +1,5 @@
 pub mod discovery;
+pub mod session;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamMode {
