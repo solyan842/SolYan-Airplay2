@@ -1,0 +1,18 @@
+[package]
+name = "solyan-airplay-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "SolYan-AirPlay2"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+tokio.workspace = true
+crossbeam-channel.workspace = true
+solyan-airplay-core = { path = "../airplay-core" }
+audio-capture = { path = "../audio-capture" }
+eframe = { version = "0.36.2", default-features = false, features = ["glow", "default_fonts", "persistence"] }
