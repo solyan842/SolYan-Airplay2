@@ -1,5 +1,4 @@
 use crate::{theme, worker};
-use base64::Engine as _;
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
 use eframe::egui::{self, Align, Color32, Layout, RichText, Sense, Stroke};
 use serde::{Deserialize, Serialize};
@@ -91,10 +90,8 @@ impl SolYanAirPlayApp {
             .and_then(|storage| eframe::get_value(storage, PREFS_KEY))
             .unwrap_or_default();
 
-        let logo_png = base64::engine::general_purpose::STANDARD
-            .decode(concat!(include_str!("../assets/solyan-airplay-logo.0.b64"), include_str!("../assets/solyan-airplay-logo.1.b64"), include_str!("../assets/solyan-airplay-logo.2.b64"), include_str!("../assets/solyan-airplay-logo.3.b64")))
-            .expect("embedded SolYan AirPlay logo must decode");
-        let icon = eframe::icon_data::from_png_bytes(&logo_png)
+        let logo_png = include_bytes!("../assets/solyan-airplay-logo.png");
+        let icon = eframe::icon_data::from_png_bytes(logo_png)
             .expect("embedded SolYan AirPlay logo must be a valid PNG");
         let logo_image = egui::ColorImage::from_rgba_unmultiplied(
             [icon.width as usize, icon.height as usize],
