@@ -9,6 +9,10 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+// Keep synthetic silence buffering intentionally tiny so a track transition
+// can never bury the next real PCM behind a long queue of zeros.
+const MAX_SYNTHETIC_QUEUE_CHUNKS: usize = 4;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveStreamMode {
     Single,
@@ -162,9 +166,6 @@ pub async fn run_live_stream(
     const SILENCE_POLL: Duration = Duration::from_millis(8);
     const ACTIVE_POLL: Duration = Duration::from_millis(20);
     const SILENCE_GRACE: Duration = Duration::from_millis(120);
-    // Synthetic silence must never be allowed to build a long backlog.
-    // Four 1024-frame source chunks are ~85-93ms at common 48/44.1k rates.
-    const MAX_SYNTHETIC_QUEUE_CHUNKS: usize = 4;
     const TRANSITION_MS: u32 = 2;
 
     let mut stream_config = StreamConfig::default();
