@@ -8,6 +8,9 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::Mutex as AsyncMutex;
+
+const MAX_SYNTHETIC_QUEUE_CHUNKS: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveStreamMode {
@@ -215,6 +218,8 @@ pub async fn run_live_stream(
     let source_block_frames: usize = 1024;
     let transition_frames =
         ((source_rate as u64 * TRANSITION_MS as u64) / 1000).max(1) as usize;
+    let silence_chunk_period =
+        Duration::from_secs_f64(source_block_frames as f64 / source_rate as f64);
 
     tracing::info!(
         "Live source format: {} Hz stereo i16 -> AirPlay {} Hz / {} frames per packet",
@@ -270,6 +275,43 @@ pub async fn run_live_stream(
     client.set_volume(desired_volume).await?;
     applied_volume = desired_volume;
 
+    // From this point onward the audio producer must never wait on RTSP.
+    // Keep feedback/keep-alive on a separate control task. Volume and stats
+    // use try_lock() below so a slow receiver cannot stall WASAPI -> PCM.
+    let client = Arc::new(AsyncMutex::new(client));
+    let feedback_client = Arc::clone(&client);
+    let feedback_stop = Arc::new(AtomicBool::new(false));
+    let feedback_stop_worker = Arc::clone(&feedback_stop);
+    let feedback_task = tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(2));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        ticker.tick().await; // consume the immediate first tick
+
+        loop {
+            ticker.tick().await;
+            if feedback_stop_worker.load(Ordering::Acquire) {
+                break;
+            }
+
+            let feedback_started = Instant::now();
+            let result = {
+                let mut guard = feedback_client.lock().await;
+                guard.send_feedback().await
+            };
+            let elapsed = feedback_started.elapsed();
+
+            if let Err(err) = result {
+                tracing::warn!("AirPlay feedback failed: {err}");
+            }
+            if elapsed >= Duration::from_millis(500) {
+                tracing::warn!(
+                    "AirPlay feedback was slow ({:.0} ms); audio producer remained independent",
+                    elapsed.as_secs_f64() * 1000.0
+                );
+            }
+        }
+    });
+
     let started = Instant::now();
     let mut captured_chunks = 0u64;
     let mut dropped_chunks = 0u64;
@@ -278,13 +320,26 @@ pub async fn run_live_stream(
     let mut in_silence = true;
     let mut last_real_at: Option<Instant> = None;
     let mut last_samples = vec![0i16; CHANNELS as usize];
-    let mut next_feedback = Instant::now() + Duration::from_secs(2);
     let mut next_progress = Instant::now() + Duration::from_millis(500);
+    let mut next_silence_at = Instant::now();
+    let mut packets_sent = 0u64;
+    let mut retransmit_requested = 0u64;
+    let mut retransmit_fulfilled = 0u64;
+    let mut underruns = 0u64;
+    let mut loss_percent = 0.0f64;
+    let mut loop_error: Option<anyhow::Error> = None;
 
     while !control.is_stopped() {
         let poll_window = if in_silence { SILENCE_POLL } else { ACTIVE_POLL };
+        let captured = match capture.poll_timeout(poll_window) {
+            Ok(captured) => captured,
+            Err(err) => {
+                loop_error = Some(err.into());
+                break;
+            }
+        };
 
-        match capture.poll_timeout(poll_window)? {
+        match captured {
             Some(chunk) => {
                 let mut samples = chunk.samples;
 
@@ -319,55 +374,58 @@ pub async fn run_live_stream(
             }
             None => {
                 late_polls += 1;
+                let now = Instant::now();
 
                 if !in_silence {
                     let grace_elapsed = last_real_at
                         .map(|t| t.elapsed() >= SILENCE_GRACE)
                         .unwrap_or(false);
 
-                    // A short WASAPI scheduling gap is normal. Do NOT inject a zero
-                    // packet here: the 400-500ms audio buffer is specifically there
-                    // to absorb this jitter. Inserting zero after one late poll was
-                    // the source of intermittent clicks in v0.1.5.
-                    if !grace_elapsed {
-                        continue;
+                    // Short WASAPI scheduling gaps are absorbed by the audio buffer.
+                    // Do not manufacture audio during the grace window, but still
+                    // run volume/progress logic below.
+                    if grace_elapsed {
+                        let samples = ramp_to_zero(
+                            &last_samples,
+                            CHANNELS as usize,
+                            source_block_frames,
+                            transition_frames,
+                        );
+                        let frame = LivePcmFrame {
+                            samples,
+                            channels: CHANNELS,
+                            sample_rate: source_rate,
+                        };
+
+                        // Synthetic audio must never block the real PCM producer.
+                        if sender.queued_frames() < MAX_SYNTHETIC_QUEUE_CHUNKS
+                            && sender.try_send(frame)
+                        {
+                            silence_chunks += 1;
+                            silence_transitions += 1;
+                            in_silence = true;
+                            last_samples.fill(0);
+                            next_silence_at = now + silence_chunk_period;
+                        }
+                    }
+                } else if now >= next_silence_at {
+                    // Keep the wire alive at the SOURCE AUDIO cadence. Polling is
+                    // intentionally faster than a PCM block, so emitting one silence
+                    // block per poll would overfill the queue and bury the next track.
+                    if sender.queued_frames() < MAX_SYNTHETIC_QUEUE_CHUNKS {
+                        let frame = LivePcmFrame {
+                            samples: vec![0; source_block_frames * CHANNELS as usize],
+                            channels: CHANNELS,
+                            sample_rate: source_rate,
+                        };
+
+                        if sender.try_send(frame) {
+                            silence_chunks += 1;
+                        }
                     }
 
-                    let samples = ramp_to_zero(
-                        &last_samples,
-                        CHANNELS as usize,
-                        source_block_frames,
-                        transition_frames,
-                    );
-                    let frame = LivePcmFrame {
-                        samples,
-                        channels: CHANNELS,
-                        sample_rate: source_rate,
-                    };
-
-                    if sender.send(frame) {
-                        silence_chunks += 1;
-                        silence_transitions += 1;
-                        in_silence = true;
-                        last_samples.fill(0);
-                    } else {
-                        dropped_chunks += 1;
-                    }
-                } else {
-                    // Once truly silent, keep the AirPlay pipeline clocked at the
-                    // packet cadence. Real PCM will replace silence immediately and
-                    // receives a short fade-in on the transition back.
-                    let frame = LivePcmFrame {
-                        samples: vec![0; source_block_frames * CHANNELS as usize],
-                        channels: CHANNELS,
-                        sample_rate: source_rate,
-                    };
-
-                    if sender.send(frame) {
-                        silence_chunks += 1;
-                    } else {
-                        dropped_chunks += 1;
-                    }
+                    // Never catch up missed silence in a burst.
+                    next_silence_at = now + silence_chunk_period;
                 }
             }
         }
@@ -375,19 +433,27 @@ pub async fn run_live_stream(
 
         let desired_volume = control.volume();
         if (desired_volume - applied_volume).abs() > 0.005 {
-            if client.set_volume(desired_volume).await.is_ok() {
-                applied_volume = desired_volume;
+            // Never wait behind feedback on the RTSP control plane. If the
+            // control mutex is busy, retry on the next producer iteration.
+            if let Ok(mut guard) = client.try_lock() {
+                if guard.set_volume(desired_volume).await.is_ok() {
+                    applied_volume = desired_volume;
+                }
             }
         }
 
         let now = Instant::now();
-        if now >= next_feedback {
-            let _ = client.send_feedback().await;
-            next_feedback = now + Duration::from_secs(2);
-        }
-
         if now >= next_progress {
-            let stats = client.stats_snapshot();
+            // Stats are observational; stale values are safer than blocking PCM.
+            if let Ok(guard) = client.try_lock() {
+                let stats = guard.stats_snapshot();
+                packets_sent = stats.packets_sent;
+                retransmit_requested = stats.rtx_requested;
+                retransmit_fulfilled = stats.rtx_fulfilled;
+                underruns = stats.underruns;
+                loss_percent = stats.loss_percent();
+            }
+
             if let Some(tx) = &progress_tx {
                 let _ = tx.try_send(StreamProgress {
                     elapsed_secs: started.elapsed().as_secs_f64(),
@@ -396,11 +462,11 @@ pub async fn run_live_stream(
                     late_polls,
                     silence_transitions,
                     dropped_chunks,
-                    packets_sent: stats.packets_sent,
-                    retransmit_requested: stats.rtx_requested,
-                    retransmit_fulfilled: stats.rtx_fulfilled,
-                    underruns: stats.underruns,
-                    loss_percent: stats.loss_percent(),
+                    packets_sent,
+                    retransmit_requested,
+                    retransmit_fulfilled,
+                    underruns,
+                    loss_percent,
                     drift_ppm: 0.0,
                     target_count: targets.len(),
                 });
@@ -411,8 +477,21 @@ pub async fn run_live_stream(
 
     capture.stop();
     drop(sender);
-    let _ = client.stop().await;
-    let _ = client.disconnect().await;
+
+    // Stop control-plane work before owning the client for shutdown.
+    feedback_stop.store(true, Ordering::Release);
+    feedback_task.abort();
+    let _ = feedback_task.await;
+
+    {
+        let mut guard = client.lock().await;
+        let _ = guard.stop().await;
+        let _ = guard.disconnect().await;
+    }
+
+    if let Some(err) = loop_error {
+        return Err(err);
+    }
 
     Ok(LiveStreamResult {
         target_names,
