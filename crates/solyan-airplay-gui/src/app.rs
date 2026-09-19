@@ -504,6 +504,114 @@ impl SolYanAirPlayApp {
 
     fn draw_sidebar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("HOMEPOD PAIR")
+                    .size(12.0)
+                    .strong()
+                    .color(theme::MUTED),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let enabled = !self.activity.is_streaming();
+                if ui
+                    .add_enabled(enabled, egui::Button::new("Search Pair"))
+                    .clicked()
+                {
+                    self.log("Searching Bonjour group metadata for HomePod stereo pairs.");
+                    self.start_scan(ui.ctx().clone());
+                }
+            });
+        });
+
+        ui.add_space(7.0);
+
+        let mut clicked_pair_id: Option<String> = None;
+        if self.homepod_pairs.is_empty() {
+            egui::Frame::new()
+                .fill(theme::SIDEBAR)
+                .stroke(Stroke::new(1.0, theme::BORDER))
+                .corner_radius(egui::CornerRadius::same(12))
+                .inner_margin(egui::Margin::same(12))
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new("No HomePod stereo pair detected")
+                            .size(12.5)
+                            .strong()
+                            .color(theme::TEXT),
+                    );
+                    ui.label(
+                        RichText::new(
+                            "Search Pair reads Apple gid / tsid group metadata. Pair the HomePods first in the Apple Home app.",
+                        )
+                        .size(10.5)
+                        .color(theme::MUTED),
+                    );
+                });
+        } else {
+            for pair in &self.homepod_pairs {
+                let selected = self.selected_pair_id.as_deref() == Some(pair.id.as_str());
+                let fill = if selected { theme::ACCENT_SOFT } else { theme::SIDEBAR };
+                let border = if selected { theme::ACCENT } else { theme::BORDER };
+
+                let response = egui::Frame::new()
+                    .fill(fill)
+                    .stroke(Stroke::new(1.0, border))
+                    .corner_radius(egui::CornerRadius::same(12))
+                    .inner_margin(egui::Margin::same(12))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            stereo_pair_icon(ui, selected);
+                            ui.add_space(10.0);
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    RichText::new(&pair.name)
+                                        .size(15.0)
+                                        .strong()
+                                        .color(theme::TEXT),
+                                );
+                                ui.label(
+                                    RichText::new(pair.member_names.join("  +  "))
+                                        .size(10.5)
+                                        .color(theme::MUTED),
+                                );
+                                ui.horizontal_wrapped(|ui| {
+                                    capability_badge(ui, "STEREO PAIR", true, true);
+                                    capability_badge(ui, "PTP", true, true);
+                                    if pair.tight_sync_id.is_some() {
+                                        capability_badge(ui, "TIGHT SYNC", true, false);
+                                    }
+                                });
+                            });
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if selected {
+                                    ui.label(
+                                        RichText::new("SELECTED")
+                                            .size(9.5)
+                                            .strong()
+                                            .color(theme::ACCENT),
+                                    );
+                                }
+                            });
+                        });
+                    })
+                    .response
+                    .interact(Sense::click());
+
+                if response.clicked() && !self.activity.is_streaming() {
+                    clicked_pair_id = Some(pair.id.clone());
+                }
+                ui.add_space(7.0);
+            }
+        }
+
+        if let Some(pair_id) = clicked_pair_id {
+            self.set_selected_pair(pair_id);
+        }
+
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(10.0);
+
+        ui.horizontal(|ui| {
             ui.label(RichText::new("AIRPLAY DEVICES").size(12.0).strong().color(theme::MUTED));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let enabled = !self.activity.is_streaming();
@@ -519,7 +627,8 @@ impl SolYanAirPlayApp {
         ui.add_space(8.0);
 
         let mut clicked_id: Option<String> = None;
-        let list_height = (ui.available_height() - 112.0).max(150.0);
+        let pair_reserved = if self.homepod_pairs.is_empty() { 118.0 } else { 150.0 };
+        let list_height = (ui.available_height() - 112.0 - pair_reserved).max(150.0);
         egui::ScrollArea::vertical()
             .id_salt("speaker-list")
             .auto_shrink([false, false])
@@ -537,7 +646,8 @@ impl SolYanAirPlayApp {
                 }
 
                 for (index, device) in self.devices.iter().enumerate() {
-                    let selected = self.selected_ids.iter().any(|id| id == &device.id);
+                    let selected = self.selected_pair_id.is_none()
+                        && self.selected_ids.iter().any(|id| id == &device.id);
                     let fill = if selected {
                         theme::ACCENT_SOFT
                     } else {
