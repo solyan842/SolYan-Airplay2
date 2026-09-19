@@ -17,7 +17,6 @@ const PREFS_KEY: &str = "solyan-airplay2-prefs";
 struct Preferences {
     volume: f32,
     render_delay_ms: u32,
-    video_low_latency: bool,
     experimental_multiroom: bool,
     last_receiver_id: Option<String>,
 }
@@ -26,8 +25,7 @@ impl Default for Preferences {
     fn default() -> Self {
         Self {
             volume: 0.80,
-            render_delay_ms: 200,
-            video_low_latency: false,
+            render_delay_ms: 350,
             experimental_multiroom: false,
             last_receiver_id: None,
         }
@@ -122,7 +120,7 @@ impl SolYanAirPlayApp {
             logo_texture,
         };
 
-        app.log("SolYan AirPlay2 v0.1.7 GUI initialized.");
+        app.log("SolYan AirPlay2 v0.1.9 GUI initialized.");
         app.start_scan(cc.egui_ctx.clone());
         app
     }
@@ -209,18 +207,11 @@ impl SolYanAirPlayApp {
             "Connecting and starting realtime ALAC stream...".into()
         };
 
-        let effective_render_delay_ms = if self.prefs.video_low_latency {
-            0
-        } else {
-            self.prefs.render_delay_ms
-        };
-
         self.log(match mode {
             LiveStreamMode::Single => {
                 format!(
-                    "Starting single-speaker stream (profile={}, render lead {} ms).",
-                    if self.prefs.video_low_latency { "Video" } else { "Music" },
-                    effective_render_delay_ms
+                    "Starting stable single-speaker stream (render lead {} ms).",
+                    self.prefs.render_delay_ms
                 )
             }
             LiveStreamMode::MultiroomExperimental => format!(
@@ -235,7 +226,7 @@ impl SolYanAirPlayApp {
             self.selected_ids.clone(),
             mode,
             control,
-            effective_render_delay_ms,
+            self.prefs.render_delay_ms,
         );
     }
 
@@ -679,20 +670,11 @@ impl SolYanAirPlayApp {
                     },
                 );
 
-                let effective_render_delay_ms = if self.prefs.video_low_latency {
-                    0
-                } else {
-                    self.prefs.render_delay_ms
-                };
                 metric(
                     &mut columns[2],
                     "Render lead",
-                    &format!("{} ms", effective_render_delay_ms),
-                    if self.prefs.video_low_latency {
-                        "Video low-latency profile"
-                    } else {
-                        "Retransmit headroom"
-                    },
+                    &format!("{} ms", self.prefs.render_delay_ms),
+                    "Stable retransmit headroom",
                 );
             });
         });
@@ -703,29 +685,6 @@ impl SolYanAirPlayApp {
             ui.label(RichText::new("Playback").size(17.0).strong().color(theme::TEXT));
             ui.add_space(8.0);
 
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Profile").color(theme::MUTED));
-                let enabled = !self.activity.is_streaming();
-                ui.add_enabled_ui(enabled, |ui| {
-                    if ui.selectable_label(!self.prefs.video_low_latency, "Music").clicked() {
-                        self.prefs.video_low_latency = false;
-                    }
-                    if ui.selectable_label(self.prefs.video_low_latency, "Video Low Latency").clicked() {
-                        self.prefs.video_low_latency = true;
-                    }
-                });
-            });
-            if self.prefs.video_low_latency {
-                ui.label(
-                    RichText::new(
-                        "Video mode removes SolYan's extra render lead. HomePod realtime ALAC can still have receiver-side latency; true frame-accurate sync requires video compensation or a lower-latency AirPlay transport.",
-                    )
-                    .size(11.0)
-                    .color(theme::ACCENT),
-                );
-            }
-
-            ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Volume").color(theme::MUTED));
                 ui.add_space(8.0);
@@ -769,7 +728,7 @@ impl SolYanAirPlayApp {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Latency").color(theme::MUTED));
-                let enabled = !self.activity.is_streaming() && !self.prefs.video_low_latency;
+                let enabled = !self.activity.is_streaming();
                 ui.add_enabled_ui(enabled, |ui| {
                     ui.add(
                         egui::Slider::new(&mut self.prefs.render_delay_ms, 0..=600)
@@ -943,14 +902,16 @@ impl SolYanAirPlayApp {
         ui.add_space(5.0);
         ui.horizontal(|ui| {
             ui.label(
-                RichText::new("© 2026 SolYan · SolYan AirPlay2 v0.1.7 · Designed & developed by SolYan")
-                    .size(10.5)
-                    .color(theme::MUTED),
+                RichText::new("© 2026 SolYan · SolYan AirPlay2 v0.1.9 · Tác giả / Designed & developed by SolYan")
+                    .size(11.0)
+                    .strong()
+                    .color(theme::TEXT),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.hyperlink_to(
-                    RichText::new("youtube.com/@SolYan-Music")
-                        .size(10.5)
+                    RichText::new("https://www.youtube.com/@SolYan-Music")
+                        .size(11.0)
+                        .strong()
                         .color(theme::ACCENT),
                     "https://www.youtube.com/@SolYan-Music",
                 );
