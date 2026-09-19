@@ -153,15 +153,15 @@ pub async fn run_live_stream(
     progress_tx: Option<Sender<StreamProgress>>,
     render_delay_ms: u32,
 ) -> Result<LiveStreamResult> {
-    const SAMPLE_RATE: u32 = 44_100;
+    const TARGET_RATE: u32 = 44_100;
     const CHANNELS: u8 = 2;
-    const CHUNK_FRAMES: usize = 352;
-    const PREBUFFER_CHUNKS: u64 = 64;
+    const TARGET_PACKET_FRAMES: usize = 352;
+    const PREBUFFER_CHUNKS: u64 = 24;
     const LIVE_QUEUE_CHUNKS: usize = 96;
     const SILENCE_POLL: Duration = Duration::from_millis(8);
     const ACTIVE_POLL: Duration = Duration::from_millis(20);
     const SILENCE_GRACE: Duration = Duration::from_millis(120);
-    const TRANSITION_FRAMES: usize = 96;
+    const TRANSITION_MS: u32 = 2;
 
     let mut stream_config = StreamConfig::default();
     if render_delay_ms == 0 {
@@ -193,21 +193,30 @@ pub async fn run_live_stream(
     }
 
     let mut capture = start_default_loopback(CaptureFormat::default())?;
-    if capture.format.sample_rate != SAMPLE_RATE
-        || capture.format.channels != CHANNELS as u16
-        || capture.format.bits_per_sample != 16
-    {
+    if capture.format.channels != CHANNELS as u16 || capture.format.bits_per_sample != 16 {
         let _ = client.disconnect().await;
         bail!(
-            "unexpected WASAPI format: {} Hz / {} ch / {} bit",
+            "unexpected normalized WASAPI format: {} Hz / {} ch / {} bit",
             capture.format.sample_rate,
             capture.format.channels,
             capture.format.bits_per_sample
         );
     }
 
+    let source_rate = capture.format.sample_rate;
+    let source_block_frames: usize = 1024;
+    let transition_frames =
+        ((source_rate as u64 * TRANSITION_MS as u64) / 1000).max(1) as usize;
+
+    tracing::info!(
+        "Live source format: {} Hz stereo i16 -> AirPlay {} Hz / {} frames per packet",
+        source_rate,
+        TARGET_RATE,
+        TARGET_PACKET_FRAMES
+    );
+
     let (sender, decoder) =
-        LiveAudioDecoder::create_pair(SAMPLE_RATE, CHANNELS, LIVE_QUEUE_CHUNKS);
+        LiveAudioDecoder::create_pair(source_rate, CHANNELS, LIVE_QUEUE_CHUNKS);
 
     // Prime AirPlay with pure silence only. Mixing "maybe real / maybe silence"
     // during session startup can create a discontinuity exactly when RECORD starts.
@@ -216,9 +225,9 @@ pub async fn run_live_stream(
     let mut silence_chunks = 0u64;
     while prebuffered < PREBUFFER_CHUNKS && !control.is_stopped() {
         let frame = LivePcmFrame {
-            samples: vec![0; CHUNK_FRAMES * CHANNELS as usize],
+            samples: vec![0; source_block_frames * CHANNELS as usize],
             channels: CHANNELS,
-            sample_rate: SAMPLE_RATE,
+            sample_rate: source_rate,
         };
         if sender.send(frame) {
             prebuffered += 1;
@@ -264,7 +273,7 @@ pub async fn run_live_stream(
                     fade_in_from_zero(
                         &mut samples,
                         chunk.channels as usize,
-                        TRANSITION_FRAMES,
+                        transition_frames,
                     );
                     in_silence = false;
                     silence_transitions += 1;
@@ -308,8 +317,8 @@ pub async fn run_live_stream(
                     let samples = ramp_to_zero(
                         &last_samples,
                         CHANNELS as usize,
-                        CHUNK_FRAMES,
-                        TRANSITION_FRAMES,
+                        source_block_frames,
+                        transition_frames,
                     );
                     let frame = LivePcmFrame {
                         samples,
@@ -330,9 +339,9 @@ pub async fn run_live_stream(
                     // packet cadence. Real PCM will replace silence immediately and
                     // receives a short fade-in on the transition back.
                     let frame = LivePcmFrame {
-                        samples: vec![0; CHUNK_FRAMES * CHANNELS as usize],
+                        samples: vec![0; source_block_frames * CHANNELS as usize],
                         channels: CHANNELS,
-                        sample_rate: SAMPLE_RATE,
+                        sample_rate: source_rate,
                     };
 
                     if sender.send(frame) {
