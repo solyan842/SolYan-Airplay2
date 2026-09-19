@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use crossbeam_channel::{bounded, Receiver, RecvTimeoutError};
+use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -46,10 +46,6 @@ impl CaptureHandle {
         }
     }
 
-    /// Poll for PCM without treating a quiet Windows endpoint as a failure.
-    ///
-    /// Ok(None) means there was no audio packet inside the requested window.
-    /// A disconnected channel still reports a real capture-engine failure.
     pub fn poll_timeout(&self, timeout: Duration) -> Result<Option<CapturedChunk>> {
         match self.rx.recv_timeout(timeout) {
             Ok(chunk) => Ok(Some(chunk)),
@@ -72,6 +68,13 @@ impl Drop for CaptureHandle {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy)]
+enum NativeSampleKind {
+    S16,
+    F32,
 }
 
 #[cfg(windows)]
@@ -108,25 +111,77 @@ fn set_capture_thread_priority() {
 }
 
 #[cfg(windows)]
-pub fn start_default_loopback(format: AudioFormat) -> Result<CaptureHandle> {
-    use wasapi::{
-        get_default_device, initialize_mta, Direction, SampleType, ShareMode, WaveFormat,
-    };
+fn convert_native_to_stereo_i16(
+    raw: &[u8],
+    frames: usize,
+    channels: usize,
+    kind: NativeSampleKind,
+) -> Vec<i16> {
+    let mut out = Vec::with_capacity(frames * 2);
 
-    if format.channels != 2 || format.bits_per_sample != 16 {
-        return Err(anyhow!("SolYan AirPlay2 capture requires stereo 16-bit PCM"));
+    match kind {
+        NativeSampleKind::S16 => {
+            let bytes_per_sample = 2usize;
+            for frame in 0..frames {
+                let sample_at = |channel: usize| -> i16 {
+                    let ch = channel.min(channels.saturating_sub(1));
+                    let idx = (frame * channels + ch) * bytes_per_sample;
+                    if idx + 1 >= raw.len() {
+                        return 0;
+                    }
+                    i16::from_le_bytes([raw[idx], raw[idx + 1]])
+                };
+
+                let left = sample_at(0);
+                let right = if channels > 1 { sample_at(1) } else { left };
+                out.push(left);
+                out.push(right);
+            }
+        }
+        NativeSampleKind::F32 => {
+            let bytes_per_sample = 4usize;
+            for frame in 0..frames {
+                let sample_at = |channel: usize| -> i16 {
+                    let ch = channel.min(channels.saturating_sub(1));
+                    let idx = (frame * channels + ch) * bytes_per_sample;
+                    if idx + 3 >= raw.len() {
+                        return 0;
+                    }
+                    let f = f32::from_le_bytes([
+                        raw[idx],
+                        raw[idx + 1],
+                        raw[idx + 2],
+                        raw[idx + 3],
+                    ])
+                    .clamp(-1.0, 1.0);
+                    (f * 32767.0).round() as i16
+                };
+
+                let left = sample_at(0);
+                let right = if channels > 1 { sample_at(1) } else { left };
+                out.push(left);
+                out.push(right);
+            }
+        }
     }
 
-    const CHUNK_FRAMES: usize = 352;
-    const EVENT_POLL_MS: u32 = 250;
+    out
+}
 
-    let (tx, rx) = bounded::<CapturedChunk>(128);
-    let (init_tx, init_rx) = std::sync::mpsc::sync_channel::<Result<String, String>>(1);
+#[cfg(windows)]
+pub fn start_default_loopback(_requested: AudioFormat) -> Result<CaptureHandle> {
+    use wasapi::{get_default_device, initialize_mta, Direction, SampleType, ShareMode};
+
+    const EVENT_POLL_MS: u32 = 250;
+    const OUTPUT_BLOCK_FRAMES: usize = 1024;
+
+    // Capture must be lossless. The previous bounded queue + try_send could
+    // silently drop a PCM block during a short scheduler stall, producing clicks.
+    let (tx, rx) = unbounded::<CapturedChunk>();
+    let (init_tx, init_rx) =
+        std::sync::mpsc::sync_channel::<Result<(String, AudioFormat), String>>(1);
     let running = Arc::new(AtomicBool::new(true));
     let thread_running = Arc::clone(&running);
-
-    let target_rate = format.sample_rate;
-    let target_channels = format.channels;
 
     let handle = thread::Builder::new()
         .name("solyan-wasapi-loopback".into())
@@ -147,28 +202,45 @@ pub fn start_default_loopback(format: AudioFormat) -> Result<CaptureHandle> {
                     .get_iaudioclient()
                     .map_err(|e| format!("get_iaudioclient: {e}"))?;
 
-                let wave_format = WaveFormat::new(
-                    16,
-                    16,
-                    &SampleType::Int,
-                    target_rate as usize,
-                    target_channels as usize,
-                    None,
-                );
-                let bytes_per_frame = wave_format.get_blockalign() as usize;
+                // Capture in the endpoint's native shared-mode format. Avoid asking
+                // Windows Audio Engine to convert 48k float -> 44.1k int in real time.
+                let mix_format = client
+                    .get_mixformat()
+                    .map_err(|e| format!("get_mixformat: {e}"))?;
+                let native_rate = mix_format.get_samplespersec();
+                let native_channels = mix_format.get_nchannels() as usize;
+                let native_bits = mix_format.get_bitspersample();
+                let native_kind = match mix_format
+                    .get_subformat()
+                    .map_err(|e| format!("get_subformat: {e}"))?
+                {
+                    SampleType::Float if native_bits == 32 => NativeSampleKind::F32,
+                    SampleType::Int if native_bits == 16 => NativeSampleKind::S16,
+                    other => {
+                        return Err(format!(
+                            "unsupported WASAPI native format: {:?}, {} bit, {} ch @ {} Hz",
+                            other, native_bits, native_channels, native_rate
+                        ))
+                    }
+                };
+
+                if native_channels == 0 {
+                    return Err("WASAPI native format has zero channels".into());
+                }
+
                 let (default_period, _) = client
                     .get_periods()
                     .map_err(|e| format!("get_periods: {e}"))?;
 
                 client
                     .initialize_client(
-                        &wave_format,
+                        &mix_format,
                         default_period,
                         &Direction::Capture,
                         &ShareMode::Shared,
                         true,
                     )
-                    .map_err(|e| format!("initialize loopback client: {e}"))?;
+                    .map_err(|e| format!("initialize native loopback client: {e}"))?;
 
                 let event = client
                     .set_get_eventhandle()
@@ -181,33 +253,78 @@ pub fn start_default_loopback(format: AudioFormat) -> Result<CaptureHandle> {
                     .start_stream()
                     .map_err(|e| format!("start_stream: {e}"))?;
 
-                let _ = init_tx.send(Ok(device_name));
-                let mut bytes = VecDeque::<u8>::with_capacity(CHUNK_FRAMES * bytes_per_frame * 8);
-                let chunk_bytes = CHUNK_FRAMES * bytes_per_frame;
+                tracing::info!(
+                    "Native WASAPI loopback: {} Hz, {} ch, {} bit {:?} -> stereo i16",
+                    native_rate,
+                    native_channels,
+                    native_bits,
+                    native_kind
+                );
+
+                let output_format = AudioFormat {
+                    sample_rate: native_rate,
+                    channels: 2,
+                    bits_per_sample: 16,
+                };
+                let _ = init_tx.send(Ok((device_name, output_format)));
+
+                let mut raw = VecDeque::<u8>::new();
+                let mut pcm = VecDeque::<i16>::with_capacity(OUTPUT_BLOCK_FRAMES * 2 * 4);
+                let output_samples_per_block = OUTPUT_BLOCK_FRAMES * 2;
 
                 while thread_running.load(Ordering::SeqCst) {
                     if event.wait_for_event(EVENT_POLL_MS).is_err() {
                         continue;
                     }
 
-                    capture
-                        .read_from_device_to_deque(&mut bytes)
-                        .map_err(|e| format!("capture read: {e}"))?;
-
-                    while bytes.len() >= chunk_bytes {
-                        let mut samples =
-                            Vec::with_capacity(CHUNK_FRAMES * target_channels as usize);
-                        for _ in 0..(CHUNK_FRAMES * target_channels as usize) {
-                            let lo = bytes.pop_front().unwrap();
-                            let hi = bytes.pop_front().unwrap();
-                            samples.push(i16::from_le_bytes([lo, hi]));
+                    // Drain every packet pending for this event. Reading only one
+                    // packet can build a hidden backlog and eventually cause a glitch.
+                    loop {
+                        let pending = capture
+                            .get_next_packet_size()
+                            .map_err(|e| format!("get_next_packet_size: {e}"))?;
+                        let Some(frames) = pending else {
+                            break;
+                        };
+                        if frames == 0 {
+                            break;
                         }
 
-                        let _ = tx.try_send(CapturedChunk {
-                            samples,
-                            sample_rate: target_rate,
-                            channels: target_channels,
-                        });
+                        raw.clear();
+                        capture
+                            .read_from_device_to_deque(&mut raw)
+                            .map_err(|e| format!("capture read: {e}"))?;
+
+                        let bytes: Vec<u8> = raw.drain(..).collect();
+                        let converted = convert_native_to_stereo_i16(
+                            &bytes,
+                            frames as usize,
+                            native_channels,
+                            native_kind,
+                        );
+                        pcm.extend(converted);
+
+                        while pcm.len() >= output_samples_per_block {
+                            let mut samples = Vec::with_capacity(output_samples_per_block);
+                            for _ in 0..output_samples_per_block {
+                                samples.push(pcm.pop_front().unwrap());
+                            }
+
+                            // Unbounded handoff intentionally preserves continuity.
+                            // Consumer backpressure is handled later in the AirPlay
+                            // decoder queue; capture itself never drops a block.
+                            if tx
+                                .send(CapturedChunk {
+                                    samples,
+                                    sample_rate: native_rate,
+                                    channels: 2,
+                                })
+                                .is_err()
+                            {
+                                let _ = client.stop_stream();
+                                return Ok(());
+                            }
+                        }
                     }
                 }
 
@@ -220,8 +337,8 @@ pub fn start_default_loopback(format: AudioFormat) -> Result<CaptureHandle> {
             }
         })?;
 
-    let device_name = match init_rx.recv_timeout(Duration::from_secs(5)) {
-        Ok(Ok(name)) => name,
+    let (device_name, format) = match init_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok(info)) => info,
         Ok(Err(error)) => return Err(anyhow!(error)),
         Err(error) => return Err(anyhow!("WASAPI init timeout: {error}")),
     };
