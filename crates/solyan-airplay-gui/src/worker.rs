@@ -27,7 +27,7 @@ fn runtime() -> Result<tokio::runtime::Runtime, String> {
     tokio::runtime::Runtime::new().map_err(|e| format!("Tokio runtime: {e}"))
 }
 
-pub fn spawn_scan(ctx: egui::Context, tx: Sender<GuiEvent>) {
+pub fn spawn_scan(ctx: egui::Context, tx: Sender<GuiEvent>) -> Result<(), String> {
     std::thread::Builder::new()
         .name("solyan-scan".into())
         .spawn(move || {
@@ -40,7 +40,8 @@ pub fn spawn_scan(ctx: egui::Context, tx: Sender<GuiEvent>) {
             let _ = tx.send(GuiEvent::ScanFinished(result));
             ctx.request_repaint();
         })
-        .ok();
+        .map(|_| ())
+        .map_err(|e| format!("Không thể tạo luồng quét AirPlay: {e}"))
 }
 
 pub fn spawn_capture_probe(ctx: egui::Context, tx: Sender<GuiEvent>) {
