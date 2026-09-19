@@ -40,3 +40,5 @@ The test captures the default Windows render device for five seconds and reports
 ## Latency direction
 
 The low-latency target is not "zero latency". The design prioritizes the HomePod receiver's real AirPlay 2 capabilities, with buffered audio + PTP where supported, then measures the minimum stable render lead time on hardware.
+
+<!-- v0.2.2-ui-polish-build: clean-logo + collapsible-diagnostics + fixed-footer -->
