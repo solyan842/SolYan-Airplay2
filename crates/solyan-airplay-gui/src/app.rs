@@ -91,7 +91,7 @@ impl SolYanAirPlayApp {
             .unwrap_or_default();
 
         let logo_png = base64::engine::general_purpose::STANDARD
-            .decode(include_str!("../assets/solyan-airplay-logo.b64").trim())
+            .decode(concat!(include_str!("../assets/solyan-airplay-logo.0.b64"), include_str!("../assets/solyan-airplay-logo.1.b64"), include_str!("../assets/solyan-airplay-logo.2.b64"), include_str!("../assets/solyan-airplay-logo.3.b64")))
             .expect("embedded SolYan AirPlay logo must decode");
         let icon = eframe::icon_data::from_png_bytes(&logo_png)
             .expect("embedded SolYan AirPlay logo must be a valid PNG");
