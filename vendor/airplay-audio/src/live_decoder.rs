@@ -6,6 +6,8 @@
 
 use airplay_core::{AudioFormat, error::Result};
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::decoder::DecodedFrame;
@@ -24,6 +26,7 @@ pub struct LivePcmFrame {
 /// Sender for pushing live PCM frames to a LiveAudioDecoder.
 pub struct LiveFrameSender {
     tx: Sender<LivePcmFrame>,
+    drift_ppm_x100: Arc<AtomicI32>,
 }
 
 impl LiveFrameSender {
@@ -58,6 +61,21 @@ impl LiveFrameSender {
     pub fn is_full(&self) -> bool {
         self.tx.is_full()
     }
+
+    pub fn queued_frames(&self) -> usize {
+        self.tx.len()
+    }
+
+    /// Set drift correction in ppm. Stored at 0.01 ppm resolution.
+    pub fn set_drift_ppm(&self, ppm: f64) {
+        let clamped = ppm.clamp(-500.0, 500.0);
+        self.drift_ppm_x100
+            .store((clamped * 100.0).round() as i32, Ordering::Relaxed);
+    }
+
+    pub fn drift_ppm(&self) -> f64 {
+        self.drift_ppm_x100.load(Ordering::Relaxed) as f64 / 100.0
+    }
 }
 
 /// Live audio decoder that receives PCM from a channel.
@@ -76,6 +94,8 @@ pub struct LiveAudioDecoder {
     recv_timeout: Duration,
     /// High-quality sinc resampler (lazily initialized when needed).
     resampler: Option<airplay_resampler::Resampler>,
+    drift_ppm_x100: Arc<AtomicI32>,
+    applied_drift_ppm_x100: i32,
 }
 
 impl LiveAudioDecoder {
@@ -84,7 +104,12 @@ impl LiveAudioDecoder {
     /// NOTE: The default receive timeout is 5ms to prevent blocking the streamer
     /// loop when the capture catches up. This allows the streamer to continue
     /// running and sending buffered frames even when no new data is available.
-    pub fn new(rx: Receiver<LivePcmFrame>, sample_rate: u32, channels: u8) -> Self {
+    pub fn new(
+        rx: Receiver<LivePcmFrame>,
+        sample_rate: u32,
+        channels: u8,
+        drift_ppm_x100: Arc<AtomicI32>,
+    ) -> Self {
         Self {
             rx,
             sample_rate,
@@ -94,6 +119,8 @@ impl LiveAudioDecoder {
             residual_samples: Vec::new(),
             recv_timeout: Duration::from_millis(2), // Very short timeout to prevent blocking!
             resampler: None,
+            drift_ppm_x100,
+            applied_drift_ppm_x100: 0,
         }
     }
 
@@ -103,8 +130,12 @@ impl LiveAudioDecoder {
     /// Channel capacity controls buffering (typically 8-16 frames).
     pub fn create_pair(sample_rate: u32, channels: u8, capacity: usize) -> (LiveFrameSender, Self) {
         let (tx, rx) = bounded::<LivePcmFrame>(capacity);
-        let sender = LiveFrameSender { tx };
-        let decoder = Self::new(rx, sample_rate, channels);
+        let drift_ppm_x100 = Arc::new(AtomicI32::new(0));
+        let sender = LiveFrameSender {
+            tx,
+            drift_ppm_x100: Arc::clone(&drift_ppm_x100),
+        };
+        let decoder = Self::new(rx, sample_rate, channels, drift_ppm_x100);
         (sender, decoder)
     }
 
@@ -197,6 +228,16 @@ impl LiveAudioDecoder {
                 target_rate,
                 self.channels,
             )?);
+        }
+
+        if source_rate != target_rate {
+            let desired = self.drift_ppm_x100.load(Ordering::Relaxed);
+            if desired != self.applied_drift_ppm_x100 {
+                if let Some(resampler) = self.resampler.as_mut() {
+                    resampler.set_drift_ppm(desired as f64 / 100.0)?;
+                    self.applied_drift_ppm_x100 = desired;
+                }
+            }
         }
 
         // Start with any leftover samples from previous call
