@@ -22,7 +22,8 @@ fn main() -> eframe::Result {
         .with_title("SolYan AirPlay2")
         .with_app_id("com.solyan.airplay2")
         .with_inner_size([1280.0, 820.0])
-        .with_min_inner_size([1040.0, 700.0]);
+        .with_min_inner_size([1040.0, 700.0])
+        .with_maximized(true);
 
     if let Some(icon) = icon {
         viewport = viewport.with_icon(icon);
