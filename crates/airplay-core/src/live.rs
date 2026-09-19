@@ -156,22 +156,14 @@ pub async fn run_live_stream(
     const TARGET_RATE: u32 = 44_100;
     const CHANNELS: u8 = 2;
     const TARGET_PACKET_FRAMES: usize = 352;
-    const PREBUFFER_CHUNKS: u64 = 24;
-    const LIVE_QUEUE_CHUNKS: usize = 96;
+    const PREBUFFER_CHUNKS: u64 = 80;
+    const LIVE_QUEUE_CHUNKS: usize = 128;
     const SILENCE_POLL: Duration = Duration::from_millis(8);
     const ACTIVE_POLL: Duration = Duration::from_millis(20);
     const SILENCE_GRACE: Duration = Duration::from_millis(120);
     const TRANSITION_MS: u32 = 2;
 
-    let mut stream_config = StreamConfig::default();
-    if render_delay_ms == 0 {
-        // Video profile: ask for the HomePod-oriented low-latency window.
-        // 3087 samples ≈ 70ms at 44.1kHz, matching upstream HomePod
-        // arrivalToRenderLatency observations. Receivers may clamp/ignore this.
-        stream_config.latency_min = 3_087;
-        stream_config.latency_max = 11_025; // ≈250ms
-    }
-
+    let stream_config = StreamConfig::default();
     let mut client = AirPlayClient::with_config(stream_config, None)?;
     client.set_render_delay_ms(render_delay_ms);
 
