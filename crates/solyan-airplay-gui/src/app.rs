@@ -77,6 +77,7 @@ pub struct SolYanAirPlayApp {
     progress_rx: Option<Receiver<StreamProgress>>,
     stream_control: Option<StreamControl>,
     progress: Option<StreamProgress>,
+    logo_texture: egui::TextureHandle,
 }
 
 impl SolYanAirPlayApp {
@@ -87,6 +88,20 @@ impl SolYanAirPlayApp {
             .storage
             .and_then(|storage| eframe::get_value(storage, PREFS_KEY))
             .unwrap_or_default();
+
+        let icon = eframe::icon_data::from_png_bytes(include_bytes!(
+            "../assets/solyan-airplay-logo.png"
+        ))
+        .expect("embedded SolYan AirPlay logo must be a valid PNG");
+        let logo_image = egui::ColorImage::from_rgba_unmultiplied(
+            [icon.width as usize, icon.height as usize],
+            &icon.rgba,
+        );
+        let logo_texture = cc.egui_ctx.load_texture(
+            "solyan-airplay-logo",
+            logo_image,
+            egui::TextureOptions::LINEAR,
+        );
 
         let (event_tx, event_rx) = unbounded();
         let mut app = Self {
@@ -102,6 +117,7 @@ impl SolYanAirPlayApp {
             progress_rx: None,
             stream_control: None,
             progress: None,
+            logo_texture,
         };
 
         app.log("SolYan AirPlay2 v0.1.6 GUI initialized.");
@@ -386,6 +402,8 @@ impl SolYanAirPlayApp {
 
     fn draw_header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            ui.image((self.logo_texture.id(), egui::vec2(54.0, 54.0)));
+            ui.add_space(8.0);
             ui.vertical(|ui| {
                 ui.label(
                     RichText::new("SolYan AirPlay2")
@@ -394,7 +412,7 @@ impl SolYanAirPlayApp {
                         .color(theme::TEXT),
                 );
                 ui.label(
-                    RichText::new("Native Windows AirPlay 2 sender for HomePod & Apple TV")
+                    RichText::new("Stream Beyond Boundaries · Native Windows AirPlay 2")
                         .size(13.0)
                         .color(theme::MUTED),
                 );
@@ -449,9 +467,11 @@ impl SolYanAirPlayApp {
         ui.add_space(8.0);
 
         let mut clicked_id: Option<String> = None;
+        let list_height = (ui.available_height() - 112.0).max(150.0);
         egui::ScrollArea::vertical()
             .id_salt("speaker-list")
             .auto_shrink([false, false])
+            .max_height(list_height)
             .show(ui, |ui| {
                 if self.devices.is_empty() {
                     theme::sidebar_card().show(ui, |ui| {
@@ -875,9 +895,11 @@ impl SolYanAirPlayApp {
             }
 
             ui.add_space(10.0);
+            let log_height = (ui.available_height() - 8.0).max(150.0);
             egui::ScrollArea::vertical()
                 .id_salt("diagnostic-log")
-                .max_height(190.0)
+                .max_height(log_height)
+                .auto_shrink([false, false])
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
                     for line in &self.logs {
@@ -889,6 +911,26 @@ impl SolYanAirPlayApp {
                         );
                     }
                 });
+        });
+    }
+
+    fn draw_footer(&self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.add_space(5.0);
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("© 2026 SolYan · SolYan AirPlay2 v0.1.6 · Designed & developed by SolYan")
+                    .size(10.5)
+                    .color(theme::MUTED),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.hyperlink_to(
+                    RichText::new("youtube.com/@SolYan-Music")
+                        .size(10.5)
+                        .color(theme::ACCENT),
+                    "https://www.youtube.com/@SolYan-Music",
+                );
+            });
         });
     }
 }
@@ -916,45 +958,124 @@ impl eframe::App for SolYanAirPlayApp {
 
         ui.add_space(4.0);
         self.draw_header(ui);
-        ui.add_space(16.0);
+        ui.add_space(12.0);
 
-        ui.horizontal(|ui| {
-            let available_height = ui.available_height();
+        let footer_height = 30.0;
+        let body_height = (ui.available_height() - footer_height).max(420.0);
 
-            let device_panel_width = (ui.available_width() * 0.34).clamp(440.0, 620.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), body_height),
+            Layout::left_to_right(Align::Min),
+            |ui| {
+                let available_height = ui.available_height();
+                let device_panel_width = (ui.available_width() * 0.35).clamp(460.0, 650.0);
 
-            ui.allocate_ui_with_layout(
-                egui::vec2(device_panel_width, available_height),
-                Layout::top_down(Align::Min),
-                |ui| {
-                    theme::sidebar_card().show(ui, |ui| {
-                        ui.set_min_height((available_height - 4.0).max(100.0));
-                        self.draw_sidebar(ui);
-                    });
-                },
-            );
-
-            ui.add_space(8.0);
-
-            ui.allocate_ui_with_layout(
-                egui::vec2(ui.available_width(), available_height),
-                Layout::top_down(Align::Min),
-                |ui| {
-                    egui::ScrollArea::vertical()
-                        .id_salt("main-scroll")
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            self.draw_stream_card(ui);
-                            ui.add_space(12.0);
-                            self.draw_controls_card(ui);
-                            ui.add_space(12.0);
-                            self.draw_multiroom_card(ui);
-                            ui.add_space(12.0);
-                            self.draw_diagnostics_card(ui);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(device_panel_width, available_height),
+                    Layout::top_down(Align::Min),
+                    |ui| {
+                        theme::sidebar_card().show(ui, |ui| {
+                            ui.set_min_height((available_height - 4.0).max(200.0));
+                            self.draw_sidebar(ui);
                         });
-                },
-            );
-        });
+                    },
+                );
+
+                ui.add_space(10.0);
+
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), available_height),
+                    Layout::top_down(Align::Min),
+                    |ui| {
+                        self.draw_stream_card(ui);
+                        ui.add_space(10.0);
+                        self.draw_controls_card(ui);
+                        ui.add_space(10.0);
+                        self.draw_multiroom_card(ui);
+                        ui.add_space(10.0);
+
+                        // Diagnostics receives every pixel left in the right pane.
+                        let diag_height = ui.available_height().max(190.0);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(ui.available_width(), diag_height),
+                            Layout::top_down(Align::Min),
+                            |ui| {
+                                theme::card().show(ui, |ui| {
+                                    ui.set_min_height((diag_height - 4.0).max(180.0));
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new("Diagnostics")
+                                                .size(17.0)
+                                                .strong()
+                                                .color(theme::TEXT),
+                                        );
+                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                            if ui.small_button("Clear log").clicked() {
+                                                self.logs.clear();
+                                            }
+                                        });
+                                    });
+
+                                    if let Some(progress) = &self.progress {
+                                        ui.add_space(10.0);
+                                        ui.columns(4, |columns| {
+                                            metric(
+                                                &mut columns[0],
+                                                "Packets",
+                                                &progress.packets_sent.to_string(),
+                                                "RTP audio packets",
+                                            );
+                                            metric(
+                                                &mut columns[1],
+                                                "Retransmit",
+                                                &progress.retransmit_requested.to_string(),
+                                                &format!("fulfilled {}", progress.retransmit_fulfilled),
+                                            );
+                                            metric(
+                                                &mut columns[2],
+                                                "Underruns",
+                                                &progress.underruns.to_string(),
+                                                &format!("loss {:.3}%", progress.loss_percent),
+                                            );
+                                            metric(
+                                                &mut columns[3],
+                                                "Captured",
+                                                &progress.captured_chunks.to_string(),
+                                                &format!(
+                                                    "silence {} · late {} · transitions {} · dropped {}",
+                                                    progress.silence_chunks,
+                                                    progress.late_polls,
+                                                    progress.silence_transitions,
+                                                    progress.dropped_chunks
+                                                ),
+                                            );
+                                        });
+                                    }
+
+                                    ui.add_space(10.0);
+                                    egui::ScrollArea::vertical()
+                                        .id_salt("diagnostic-log-full")
+                                        .auto_shrink([false, false])
+                                        .stick_to_bottom(true)
+                                        .show(ui, |ui| {
+                                            for line in &self.logs {
+                                                ui.label(
+                                                    RichText::new(line)
+                                                        .monospace()
+                                                        .size(11.0)
+                                                        .color(theme::MUTED),
+                                                );
+                                            }
+                                        });
+                                });
+                            },
+                        );
+                    },
+                );
+            },
+        );
+
+        self.draw_footer(ui);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
