@@ -1,30 +1,17 @@
-use base64::Engine as _;
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::PathBuf;
 
 fn main() {
-    println!("cargo:rerun-if-changed=assets/solyan-airplay-logo.0.b64");
-    println!("cargo:rerun-if-changed=assets/solyan-airplay-logo.1.b64");
-    println!("cargo:rerun-if-changed=assets/solyan-airplay-logo.2.b64");
-    println!("cargo:rerun-if-changed=assets/solyan-airplay-logo.3.b64");
+    println!("cargo:rerun-if-changed=assets/solyan-airplay-logo.png");
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
 
-    let b64 = concat!(
-        include_str!("assets/solyan-airplay-logo.0.b64"),
-        include_str!("assets/solyan-airplay-logo.1.b64"),
-        include_str!("assets/solyan-airplay-logo.2.b64"),
-        include_str!("assets/solyan-airplay-logo.3.b64"),
-    );
+    let png = include_bytes!("assets/solyan-airplay-logo.png");
 
-    let png = base64::engine::general_purpose::STANDARD
-        .decode(b64.split_whitespace().collect::<String>())
-        .expect("SolYan logo base64 must decode");
-
-    let image = image::load_from_memory(&png)
+    let image = image::load_from_memory(png)
         .expect("SolYan logo PNG must decode")
         .resize_exact(256, 256, image::imageops::FilterType::Lanczos3)
         .to_rgba8();
