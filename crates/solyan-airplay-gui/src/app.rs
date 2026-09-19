@@ -147,7 +147,7 @@ impl SolYanAirPlayApp {
             logo_dark_texture,
         };
 
-        app.log("SolYan AirPlay2 v0.2.10 GUI initialized.");
+        app.log("SolYan AirPlay2 v0.2.11 GUI initialized.");
         app.start_scan(cc.egui_ctx.clone());
         app
     }
@@ -171,7 +171,7 @@ impl SolYanAirPlayApp {
             .unwrap_or_else(|_| std::path::PathBuf::from("."));
         let desktop = base.join("Desktop");
         let dir = if desktop.is_dir() { desktop } else { base };
-        let path = dir.join("SolYan-AirPlay2-v0.2.10-log.txt");
+        let path = dir.join("SolYan-AirPlay2-v0.2.11-log.txt");
         match std::fs::write(&path, body) {
             Ok(()) => {
                 self.status = if self.prefs.vietnamese {
@@ -1277,7 +1277,7 @@ impl SolYanAirPlayApp {
                             .color(theme::ACCENT),
                     );
                     ui.label(
-                        RichText::new("· SolYan AirPlay2 v0.2.10")
+                        RichText::new("· SolYan AirPlay2 v0.2.11")
                             .size(11.5)
                             .strong()
                             .color(theme::text()),
