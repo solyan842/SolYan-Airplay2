@@ -75,6 +75,39 @@ impl Drop for CaptureHandle {
 }
 
 #[cfg(windows)]
+fn set_capture_thread_priority() {
+    use windows_sys::Win32::System::Threading::{
+        AvSetMmThreadCharacteristicsW, AvSetMmThreadPriority, GetCurrentThread,
+        SetThreadPriority, AVRT_PRIORITY_HIGH, THREAD_PRIORITY_HIGHEST,
+    };
+
+    let task_name: Vec<u16> = "Pro Audio\0".encode_utf16().collect();
+    let mut task_index: u32 = 0;
+
+    unsafe {
+        let handle = AvSetMmThreadCharacteristicsW(task_name.as_ptr(), &mut task_index);
+        if !handle.is_null() {
+            let _ = AvSetMmThreadPriority(handle, AVRT_PRIORITY_HIGH);
+            tracing::info!(
+                "WASAPI capture registered with Windows MMCSS 'Pro Audio' (task index {})",
+                task_index
+            );
+            return;
+        }
+
+        let ok = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+        if ok != 0 {
+            tracing::info!("WASAPI capture priority set to THREAD_PRIORITY_HIGHEST");
+        } else {
+            tracing::warn!(
+                "Failed to elevate WASAPI capture thread priority: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+}
+
+#[cfg(windows)]
 pub fn start_default_loopback(format: AudioFormat) -> Result<CaptureHandle> {
     use wasapi::{
         get_default_device, initialize_mta, Direction, SampleType, ShareMode, WaveFormat,
@@ -87,7 +120,7 @@ pub fn start_default_loopback(format: AudioFormat) -> Result<CaptureHandle> {
     const CHUNK_FRAMES: usize = 352;
     const EVENT_POLL_MS: u32 = 250;
 
-    let (tx, rx) = bounded::<CapturedChunk>(64);
+    let (tx, rx) = bounded::<CapturedChunk>(128);
     let (init_tx, init_rx) = std::sync::mpsc::sync_channel::<Result<String, String>>(1);
     let running = Arc::new(AtomicBool::new(true));
     let thread_running = Arc::clone(&running);
@@ -102,6 +135,7 @@ pub fn start_default_loopback(format: AudioFormat) -> Result<CaptureHandle> {
                 initialize_mta()
                     .ok()
                     .map_err(|e| format!("initialize_mta: {e}"))?;
+                set_capture_thread_priority();
 
                 let device = get_default_device(&Direction::Render)
                     .map_err(|e| format!("get_default_device: {e}"))?;
