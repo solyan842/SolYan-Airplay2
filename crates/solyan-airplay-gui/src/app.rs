@@ -752,7 +752,11 @@ impl SolYanAirPlayApp {
                 .color(theme::MUTED),
         );
 
-        if old && !self.prefs.experimental_multiroom && self.selected_ids.len() > 1 {
+        if self.selected_pair_id.is_none()
+            && old
+            && !self.prefs.experimental_multiroom
+            && self.selected_ids.len() > 1
+        {
             self.selected_ids.truncate(1);
         }
     }
@@ -823,7 +827,9 @@ impl SolYanAirPlayApp {
                     "WASAPI loopback",
                 );
 
-                let protocol = if self.prefs.experimental_multiroom && self.selected_ids.len() >= 2 {
+                let protocol = if self.selected_pair_id.is_some()
+                    || (self.prefs.experimental_multiroom && self.selected_ids.len() >= 2)
+                {
                     "ALAC / PTP"
                 } else {
                     "ALAC / NTP"
@@ -832,7 +838,9 @@ impl SolYanAirPlayApp {
                     &mut columns[1],
                     "Protocol",
                     protocol,
-                    if protocol.contains("PTP") {
+                    if self.selected_pair_id.is_some() {
+                        "HomePod stereo-pair timing"
+                    } else if protocol.contains("PTP") {
                         "Experimental group timing"
                     } else {
                         "Realtime compatibility path"
@@ -1271,6 +1279,44 @@ fn capability_badge(ui: &mut egui::Ui, label: &str, enabled: bool, experimental:
         });
 }
 
+
+
+fn stereo_pair_icon(ui: &mut egui::Ui, selected: bool) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(58.0, 48.0), Sense::hover());
+    let painter = ui.painter_at(rect);
+    let fg = if selected { theme::ACCENT } else { theme::TEXT };
+    let soft = fg.gamma_multiply(0.14);
+    let center = rect.center();
+
+    let left = egui::Rect::from_center_size(
+        egui::pos2(center.x - 10.0, center.y),
+        egui::vec2(25.0, 34.0),
+    );
+    let right = egui::Rect::from_center_size(
+        egui::pos2(center.x + 10.0, center.y),
+        egui::vec2(25.0, 34.0),
+    );
+
+    painter.rect_filled(left, egui::CornerRadius::same(9), soft);
+    painter.rect_filled(right, egui::CornerRadius::same(9), soft);
+    painter.circle_filled(
+        egui::pos2(left.center().x, left.top() + 5.0),
+        2.5,
+        fg.gamma_multiply(0.78),
+    );
+    painter.circle_filled(
+        egui::pos2(right.center().x, right.top() + 5.0),
+        2.5,
+        fg.gamma_multiply(0.78),
+    );
+    painter.text(
+        egui::pos2(center.x, center.y + 4.0),
+        egui::Align2::CENTER_CENTER,
+        "PAIR",
+        egui::FontId::proportional(8.0),
+        fg,
+    );
+}
 
 fn device_sort_rank(kind: DeviceKind) -> u8 {
     match kind {
