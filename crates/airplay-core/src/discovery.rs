@@ -24,6 +24,9 @@ pub struct AirPlayReceiver {
     pub group_public_name: Option<String>,
     pub group_contains_discoverable_leader: bool,
     pub parent_group_id: Option<String>,
+    pub parent_group_contains_discoverable_leader: bool,
+    pub home_group_id: Option<String>,
+    pub household_id: Option<String>,
     pub tight_sync_id: Option<String>,
 }
 
@@ -66,6 +69,9 @@ pub async fn discover_once(timeout: Duration) -> Result<Vec<AirPlayReceiver>> {
                 group_public_name: d.group_public_name.map(|v| decode_dns_sd_name(&v)),
                 group_contains_discoverable_leader: d.group_contains_discoverable_leader,
                 parent_group_id: d.parent_group_id.map(|v| v.to_string()),
+                parent_group_contains_discoverable_leader: d.parent_group_contains_discoverable_leader,
+                home_group_id: d.home_group_id.map(|v| v.to_string()),
+                household_id: d.household_id,
                 tight_sync_id: d.tight_sync_id.map(|v| v.to_string()),
             }
         })
@@ -164,6 +170,7 @@ pub struct HomePodPair {
     pub member_ids: Vec<String>,
     pub member_names: Vec<String>,
     pub group_id: Option<String>,
+    pub parent_group_id: Option<String>,
     pub tight_sync_id: Option<String>,
 }
 
@@ -171,11 +178,15 @@ pub fn detect_homepod_pairs(devices: &[AirPlayReceiver]) -> Vec<HomePodPair> {
     use std::collections::{BTreeMap, BTreeSet};
 
     let mut by_tsid: BTreeMap<String, Vec<&AirPlayReceiver>> = BTreeMap::new();
+    let mut by_pgid: BTreeMap<String, Vec<&AirPlayReceiver>> = BTreeMap::new();
     let mut by_gid: BTreeMap<String, Vec<&AirPlayReceiver>> = BTreeMap::new();
 
     for device in devices.iter().filter(|d| d.device_kind().is_homepod()) {
         if let Some(tsid) = &device.tight_sync_id {
             by_tsid.entry(tsid.clone()).or_default().push(device);
+        }
+        if let Some(pgid) = &device.parent_group_id {
+            by_pgid.entry(pgid.clone()).or_default().push(device);
         }
         if let Some(gid) = &device.group_id {
             by_gid.entry(gid.clone()).or_default().push(device);
@@ -191,7 +202,24 @@ pub fn detect_homepod_pairs(devices: &[AirPlayReceiver]) -> Vec<HomePodPair> {
         }
         let key = format!("tsid:{tsid}");
         consumed.extend(members.iter().map(|d| d.id.clone()));
-        pairs.push(build_homepod_pair(key, members, Some(tsid), None));
+        pairs.push(build_homepod_pair(key, members, Some(tsid), None, None));
+    }
+
+    for (pgid, members) in by_pgid {
+        if members.len() != 2 || members.iter().all(|d| consumed.contains(&d.id)) {
+            continue;
+        }
+
+        let confident = members.iter().any(|d| d.parent_group_contains_discoverable_leader)
+            || members.iter().any(|d| d.is_group_leader)
+            || members.iter().any(|d| d.group_public_name.is_some());
+        if !confident {
+            continue;
+        }
+
+        let key = format!("pgid:{pgid}");
+        consumed.extend(members.iter().map(|d| d.id.clone()));
+        pairs.push(build_homepod_pair(key, members, None, None, Some(pgid)));
     }
 
     for (gid, members) in by_gid {
@@ -209,7 +237,7 @@ pub fn detect_homepod_pairs(devices: &[AirPlayReceiver]) -> Vec<HomePodPair> {
         }
 
         let key = format!("gid:{gid}");
-        pairs.push(build_homepod_pair(key, members, None, Some(gid)));
+        pairs.push(build_homepod_pair(key, members, None, Some(gid), None));
     }
 
     pairs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -221,6 +249,7 @@ fn build_homepod_pair(
     mut members: Vec<&AirPlayReceiver>,
     tight_sync_id: Option<String>,
     group_id: Option<String>,
+    parent_group_id: Option<String>,
 ) -> HomePodPair {
     members.sort_by_key(|d| (!d.is_group_leader, d.name.to_lowercase()));
 
@@ -246,6 +275,7 @@ fn build_homepod_pair(
         member_ids: members.iter().map(|d| d.id.clone()).collect(),
         member_names: members.iter().map(|d| d.name.clone()).collect(),
         group_id: group_id.or_else(|| leader.group_id.clone()),
+        parent_group_id: parent_group_id.or_else(|| leader.parent_group_id.clone()),
         tight_sync_id: tight_sync_id.or_else(|| leader.tight_sync_id.clone()),
     }
 }
@@ -274,8 +304,25 @@ mod homepod_pair_tests {
             group_public_name: Some("Phòng ngủ".into()),
             group_contains_discoverable_leader: leader,
             parent_group_id: None,
+            parent_group_contains_discoverable_leader: false,
+            home_group_id: None,
+            household_id: None,
             tight_sync_id: tsid.map(str::to_string),
         }
+    }
+
+    #[test]
+    fn detects_parent_group_pair() {
+        let mut a = hp("A", "Left", None, None, true);
+        let mut b = hp("B", "Right", None, None, false);
+        a.parent_group_id = Some("PARENT-PAIR".into());
+        b.parent_group_id = Some("PARENT-PAIR".into());
+        a.parent_group_contains_discoverable_leader = true;
+        b.parent_group_contains_discoverable_leader = true;
+
+        let pairs = detect_homepod_pairs(&[a, b]);
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].parent_group_id.as_deref(), Some("PARENT-PAIR"));
     }
 
     #[test]
