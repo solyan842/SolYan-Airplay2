@@ -60,6 +60,7 @@ pub struct StreamProgress {
     pub retransmit_fulfilled: u64,
     pub underruns: u64,
     pub loss_percent: f64,
+    pub drift_ppm: f64,
     pub target_count: usize,
 }
 
@@ -262,6 +263,14 @@ pub async fn run_live_stream(
     let mut next_feedback = Instant::now() + Duration::from_secs(2);
     let mut next_progress = Instant::now() + Duration::from_millis(500);
 
+    // Measure the physical WASAPI endpoint clock against the same monotonic
+    // timebase used by the RTP sender. A small ppm mismatch accumulates over
+    // time and can otherwise cause occasional discontinuities/clicks.
+    let mut drift_window_start = Instant::now();
+    let mut drift_window_frames = capture.total_frames();
+    let mut drift_ppm_ema = 0.0f64;
+    let mut next_drift_update = Instant::now() + Duration::from_secs(5);
+
     while !control.is_stopped() {
         let poll_window = if in_silence { SILENCE_POLL } else { ACTIVE_POLL };
 
@@ -353,6 +362,43 @@ pub async fn run_live_stream(
             }
         }
 
+        let now = Instant::now();
+        if now >= next_drift_update {
+            let total_frames = capture.total_frames();
+            let delta_frames = total_frames.saturating_sub(drift_window_frames);
+            let dt = now.duration_since(drift_window_start).as_secs_f64();
+
+            // Ignore windows where the endpoint was effectively idle. Clock-rate
+            // estimation is meaningful only when enough hardware frames arrived.
+            if !in_silence && dt >= 4.0 && delta_frames >= source_rate as u64 * 2 {
+                let measured_rate = delta_frames as f64 / dt;
+                let source_error_ppm =
+                    (measured_rate / source_rate as f64 - 1.0) * 1_000_000.0;
+
+                // If the source hardware runs fast, lower output/input ratio so
+                // more source frames are consumed per AirPlay output frame.
+                let desired_correction = (-source_error_ppm).clamp(-500.0, 500.0);
+
+                // Slow EMA prevents short scheduler noise from modulating pitch.
+                drift_ppm_ema =
+                    (drift_ppm_ema * 0.80 + desired_correction * 0.20)
+                        .clamp(-500.0, 500.0);
+                sender.set_drift_ppm(drift_ppm_ema);
+
+                tracing::info!(
+                    "Clock drift: nominal={}Hz measured={:.3}Hz source_error={:+.1}ppm correction={:+.1}ppm",
+                    source_rate,
+                    measured_rate,
+                    source_error_ppm,
+                    drift_ppm_ema
+                );
+            }
+
+            drift_window_start = now;
+            drift_window_frames = total_frames;
+            next_drift_update = now + Duration::from_secs(5);
+        }
+
         let desired_volume = control.volume();
         if (desired_volume - applied_volume).abs() > 0.005 {
             if client.set_volume(desired_volume).await.is_ok() {
@@ -381,6 +427,7 @@ pub async fn run_live_stream(
                     retransmit_fulfilled: stats.rtx_fulfilled,
                     underruns: stats.underruns,
                     loss_percent: stats.loss_percent(),
+                    drift_ppm: sender.drift_ppm(),
                     target_count: targets.len(),
                 });
             }
