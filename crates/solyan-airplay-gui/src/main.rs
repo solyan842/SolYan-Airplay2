@@ -5,15 +5,21 @@ mod theme;
 mod worker;
 
 use app::SolYanAirPlayApp;
+use base64::Engine as _;
 use eframe::egui;
 use std::sync::Arc;
 
+fn embedded_logo_png() -> Vec<u8> {
+    base64::engine::general_purpose::STANDARD
+        .decode(include_str!("../assets/solyan-airplay-logo.b64").trim())
+        .expect("embedded SolYan AirPlay logo must decode")
+}
+
 fn main() -> eframe::Result {
-    let icon = eframe::icon_data::from_png_bytes(include_bytes!(
-        "../assets/solyan-airplay-logo.png"
-    ))
-    .ok()
-    .map(Arc::new);
+    let logo_png = embedded_logo_png();
+    let icon = eframe::icon_data::from_png_bytes(&logo_png)
+        .ok()
+        .map(Arc::new);
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("SolYan AirPlay2")
