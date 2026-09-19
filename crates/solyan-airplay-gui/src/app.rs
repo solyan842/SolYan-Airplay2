@@ -94,24 +94,38 @@ impl SolYanAirPlayApp {
 
         theme::apply(&cc.egui_ctx, prefs.light_theme);
 
-        let load_logo = |name: &str, png: &[u8]| {
-            let icon = eframe::icon_data::from_png_bytes(png)
-                .expect("embedded SolYan AirPlay logo must be a valid PNG");
+        let load_logo = |name: &str, png: &[u8]| -> Option<egui::TextureHandle> {
+            let icon = eframe::icon_data::from_png_bytes(png).ok()?;
             let image = egui::ColorImage::from_rgba_unmultiplied(
                 [icon.width as usize, icon.height as usize],
                 &icon.rgba,
             );
-            cc.egui_ctx.load_texture(name, image, egui::TextureOptions::LINEAR)
+            Some(cc.egui_ctx.load_texture(name, image, egui::TextureOptions::LINEAR))
         };
 
+        // Startup must never depend on decorative assets being perfect.
+        // The main/light logo is also validated by build.rs for the Windows icon.
         let logo_light_texture = load_logo(
             "solyan-airplay-logo-light",
-            include_bytes!("../assets/solyan-airplay-logo-light.png"),
-        );
+            include_bytes!("../assets/solyan-airplay-logo.png"),
+        )
+        .unwrap_or_else(|| {
+            let image = egui::ColorImage::new(
+                [1, 1],
+                vec![theme::ACCENT],
+            );
+            cc.egui_ctx.load_texture(
+                "solyan-airplay-logo-fallback",
+                image,
+                egui::TextureOptions::LINEAR,
+            )
+        });
+
         let logo_dark_texture = load_logo(
             "solyan-airplay-logo-dark",
             include_bytes!("../assets/solyan-airplay-logo-dark.png"),
-        );
+        )
+        .unwrap_or_else(|| logo_light_texture.clone());
 
         let (event_tx, event_rx) = unbounded();
         let mut app = Self {
