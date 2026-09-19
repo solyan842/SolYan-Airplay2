@@ -660,7 +660,7 @@ impl AudioStreamer {
 
         if self.task.is_none() {
             // Set up the dedicated sender thread with cloned sockets
-            let (tx, rx) = bounded::<SenderMessage>(32);
+            let (tx, rx) = bounded::<SenderMessage>(2);
             let frame_duration = std::time::Duration::from_nanos(frame_duration_ns);
 
             {
@@ -801,7 +801,7 @@ impl AudioStreamer {
 
         if self.task.is_none() {
             // Set up the dedicated sender thread with cloned sockets
-            let (tx, rx) = bounded::<SenderMessage>(32);
+            let (tx, rx) = bounded::<SenderMessage>(2);
             let frame_duration = std::time::Duration::from_nanos(frame_duration_ns);
 
             {
@@ -1422,11 +1422,10 @@ async fn run_streamer(
         }
 
         if has_sender_thread {
-            // With sender thread: no sleep needed here. The bounded channel
-            // provides natural backpressure - when it's full, the blocking send
-            // (via spawn_blocking) throttles us to match the sender thread's
-            // consumption rate. This keeps the channel maximally filled so the
-            // sender thread never starves.
+            // Keep this queue intentionally shallow. Sync packets contain an
+            // NTP wall-clock value prepared by the producer; a deep sender queue
+            // makes that clock mapping stale by N * 7.98ms before transmission.
+            // PCM stability comes from the large audio buffer, not RTP queue depth.
             //
             // Yield to let other Tokio tasks run (NTP, control, etc.)
             tokio::task::yield_now().await;
