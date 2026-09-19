@@ -41,6 +41,7 @@ enum Activity {
     Scanning,
     AudioTest,
     ConnectionTest,
+    PreparingStream,
     Streaming,
     Stopping,
 }
@@ -52,13 +53,14 @@ impl Activity {
             Self::Scanning => "Scanning",
             Self::AudioTest => "Testing audio",
             Self::ConnectionTest => "Testing AirPlay",
+            Self::PreparingStream => "Preparing",
             Self::Streaming => "Streaming",
             Self::Stopping => "Stopping",
         }
     }
 
     fn is_streaming(self) -> bool {
-        matches!(self, Self::Streaming | Self::Stopping)
+        matches!(self, Self::PreparingStream | Self::Streaming | Self::Stopping)
     }
 
     fn is_busy(self) -> bool {
@@ -147,7 +149,7 @@ impl SolYanAirPlayApp {
             logo_dark_texture,
         };
 
-        app.log("SolYan AirPlay2 v0.2.11 GUI initialized.");
+        app.log("SolYan AirPlay2 v0.2.12 GUI initialized.");
         app.start_scan(cc.egui_ctx.clone());
         app
     }
@@ -171,7 +173,7 @@ impl SolYanAirPlayApp {
             .unwrap_or_else(|_| std::path::PathBuf::from("."));
         let desktop = base.join("Desktop");
         let dir = if desktop.is_dir() { desktop } else { base };
-        let path = dir.join("SolYan-AirPlay2-v0.2.11-log.txt");
+        let path = dir.join("SolYan-AirPlay2-v0.2.12-log.txt");
         match std::fs::write(&path, body) {
             Ok(()) => {
                 self.status = if self.prefs.vietnamese {
@@ -264,16 +266,26 @@ impl SolYanAirPlayApp {
         self.stream_control = Some(control.clone());
         self.progress_rx = Some(progress_rx);
         self.progress = None;
-        self.activity = Activity::Streaming;
+        self.activity = Activity::PreparingStream;
         self.last_error = None;
 
         let target_count = self.selected_ids.len();
         self.status = if self.selected_pair_id.is_some() {
-            "Connecting to HomePod stereo pair using grouped PTP timing...".into()
+            self.tr(
+                "Preparing HomePod stereo pair — checking PTP, audio capture and packet flow...",
+                "Đang chuẩn bị cặp HomePod — kiểm tra PTP, thu âm và luồng packet...",
+            ).into()
         } else if mode == LiveStreamMode::MultiroomExperimental {
-            format!("Building experimental PTP group for {target_count} speakers...")
+            format!(
+                "{} {target_count} {}",
+                self.tr("Preparing PTP group for", "Đang chuẩn bị nhóm PTP cho"),
+                self.tr("speakers — waiting for audio readiness...", "loa — chờ hệ thống âm thanh sẵn sàng...")
+            )
         } else {
-            "Connecting and starting realtime ALAC stream...".into()
+            self.tr(
+                "Preparing AirPlay stream — checking session, WASAPI and packet flow...",
+                "Đang chuẩn bị luồng AirPlay — kiểm tra session, WASAPI và packet...",
+            ).into()
         };
 
         let effective_render_delay_ms = self.prefs.render_delay_ms;
@@ -559,6 +571,8 @@ impl SolYanAirPlayApp {
                     (self.tr("Attention", "Chú ý"), theme::RED)
                 } else if self.activity == Activity::Streaming {
                     (self.tr("Live", "Đang phát"), theme::GREEN)
+                } else if self.activity == Activity::PreparingStream {
+                    (self.tr("Preparing", "Đang chuẩn bị"), theme::BLUE)
                 } else if self.activity == Activity::Stopping {
                     (self.tr("Stopping", "Đang dừng"), theme::ACCENT)
                 } else if self.activity.is_busy() {
@@ -957,7 +971,13 @@ impl SolYanAirPlayApp {
             if narrow {
                 ui.vertical(|ui| {
                     ui.label(
-                        RichText::new(self.tr("NOW STREAMING", "ĐANG PHÁT"))
+                        RichText::new(if self.activity == Activity::PreparingStream {
+                            self.tr("PREPARING STREAM", "ĐANG CHUẨN BỊ")
+                        } else if self.activity == Activity::Streaming {
+                            self.tr("NOW STREAMING", "ĐANG PHÁT")
+                        } else {
+                            self.tr("AIRPLAY STREAM", "PHÁT AIRPLAY")
+                        })
                             .size(11.0).strong().color(theme::muted()),
                     );
                     let names = self.selected_name_list();
@@ -974,7 +994,13 @@ impl SolYanAirPlayApp {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.label(
-                            RichText::new(self.tr("NOW STREAMING", "ĐANG PHÁT"))
+                            RichText::new(if self.activity == Activity::PreparingStream {
+                            self.tr("PREPARING STREAM", "ĐANG CHUẨN BỊ")
+                        } else if self.activity == Activity::Streaming {
+                            self.tr("NOW STREAMING", "ĐANG PHÁT")
+                        } else {
+                            self.tr("AIRPLAY STREAM", "PHÁT AIRPLAY")
+                        })
                                 .size(11.0).strong().color(theme::muted()),
                         );
                         let names = self.selected_name_list();
@@ -1047,7 +1073,9 @@ impl SolYanAirPlayApp {
                 .corner_radius(egui::CornerRadius::same(9))
                 .min_size(egui::vec2(122.0, 42.0)),
             );
-            if stop.clicked() && self.activity == Activity::Streaming {
+            if stop.clicked()
+                && matches!(self.activity, Activity::PreparingStream | Activity::Streaming)
+            {
                 self.stop_stream();
             }
         } else {
@@ -1277,7 +1305,7 @@ impl SolYanAirPlayApp {
                             .color(theme::ACCENT),
                     );
                     ui.label(
-                        RichText::new("· SolYan AirPlay2 v0.2.11")
+                        RichText::new("· SolYan AirPlay2 v0.2.12")
                             .size(11.5)
                             .strong()
                             .color(theme::text()),
@@ -1308,6 +1336,22 @@ impl eframe::App for SolYanAirPlayApp {
 
         if let Some(rx) = &self.progress_rx {
             while let Ok(progress) = rx.try_recv() {
+                if self.activity == Activity::PreparingStream
+                    && progress.captured_chunks > 0
+                    && progress.packets_sent > 0
+                {
+                    self.activity = Activity::Streaming;
+                    self.status = self.tr(
+                        "AirPlay ready — audio capture and packet flow verified.",
+                        "AirPlay đã sẵn sàng — đã xác nhận thu âm và luồng packet.",
+                    ).into();
+                    self.log(format!(
+                        "STREAM READY: captured_chunks={}, packets_sent={}, targets={}.",
+                        progress.captured_chunks,
+                        progress.packets_sent,
+                        progress.target_count
+                    ));
+                }
                 self.progress = Some(progress);
             }
         }
