@@ -1107,28 +1107,40 @@ impl SolYanAirPlayApp {
     }
 
     fn draw_footer(&self, ui: &mut egui::Ui) {
-        ui.separator();
-        ui.add_space(6.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.label(
-                RichText::new("© 2026 SolYan · SolYan AirPlay2 v0.2.1")
-                    .size(11.0)
-                    .strong()
-                    .color(theme::TEXT),
-            );
-            ui.label(
-                RichText::new("· Tác giả / Developer: SolYan ·")
-                    .size(11.0)
-                    .color(theme::MUTED),
-            );
-            ui.hyperlink_to(
-                RichText::new("https://www.youtube.com/@SolYan-Music")
-                    .size(11.0)
-                    .strong()
-                    .color(theme::ACCENT),
-                "https://www.youtube.com/@SolYan-Music",
-            );
-        });
+        egui::Frame::new()
+            .fill(theme::SIDEBAR)
+            .stroke(Stroke::new(1.0, theme::BORDER))
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(egui::Margin::symmetric(12, 7))
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new("© 2026 SolYan")
+                            .size(12.0)
+                            .strong()
+                            .color(theme::ACCENT),
+                    );
+                    ui.label(
+                        RichText::new("· SolYan AirPlay2 v0.2.1")
+                            .size(11.5)
+                            .strong()
+                            .color(theme::TEXT),
+                    );
+                    ui.label(
+                        RichText::new("· Tác giả / Developer: SolYan ·")
+                            .size(11.5)
+                            .strong()
+                            .color(theme::TEXT),
+                    );
+                    ui.hyperlink_to(
+                        RichText::new("https://www.youtube.com/@SolYan-Music")
+                            .size(11.5)
+                            .strong()
+                            .color(theme::ACCENT),
+                        "https://www.youtube.com/@SolYan-Music",
+                    );
+                });
+            });
     }
 }
 
@@ -1157,22 +1169,38 @@ impl eframe::App for SolYanAirPlayApp {
         self.draw_header(ui);
         ui.add_space(12.0);
 
-        let footer_height = 30.0;
-        let body_height = (ui.available_height() - footer_height).max(420.0);
+        // The footer owns the bottom of the window. It is never placed after the
+        // content flow, so a tall sidebar/diagnostics panel cannot push it offscreen.
+        let available = ui.available_rect_before_wrap();
+        let footer_height = 44.0f32;
+        let footer_gap = 8.0f32;
 
-        ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), body_height),
-            Layout::left_to_right(Align::Min),
+        let footer_top = (available.bottom() - footer_height).max(available.top());
+        let body_bottom = (footer_top - footer_gap).max(available.top());
+
+        let body_rect = egui::Rect::from_min_max(
+            available.min,
+            egui::pos2(available.right(), body_bottom),
+        );
+        let footer_rect = egui::Rect::from_min_max(
+            egui::pos2(available.left(), footer_top),
+            available.max,
+        );
+
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(body_rect)
+                .layout(Layout::left_to_right(Align::Min)),
             |ui| {
-                let available_height = ui.available_height();
-                let device_panel_width = (ui.available_width() * 0.35).clamp(460.0, 650.0);
+                let available_height = body_rect.height();
+                let device_panel_width = (body_rect.width() * 0.35).clamp(460.0, 650.0);
 
                 ui.allocate_ui_with_layout(
                     egui::vec2(device_panel_width, available_height),
                     Layout::top_down(Align::Min),
                     |ui| {
                         theme::sidebar_card().show(ui, |ui| {
-                            ui.set_min_height((available_height - 4.0).max(200.0));
+                            ui.set_min_height((available_height - 4.0).max(120.0));
                             self.draw_sidebar(ui);
                         });
                     },
@@ -1191,14 +1219,15 @@ impl eframe::App for SolYanAirPlayApp {
                         self.draw_multiroom_card(ui);
                         ui.add_space(10.0);
 
-                        // Diagnostics receives every pixel left in the right pane.
-                        let diag_height = ui.available_height().max(190.0);
+                        // Diagnostics gets only the pixels that actually remain.
+                        // Its log scrolls internally instead of increasing body height.
+                        let diag_height = ui.available_height().max(120.0);
                         ui.allocate_ui_with_layout(
                             egui::vec2(ui.available_width(), diag_height),
                             Layout::top_down(Align::Min),
                             |ui| {
                                 theme::card().show(ui, |ui| {
-                                    ui.set_min_height((diag_height - 4.0).max(180.0));
+                                    ui.set_min_height((diag_height - 4.0).max(110.0));
                                     ui.horizontal(|ui| {
                                         ui.label(
                                             RichText::new("Diagnostics")
@@ -1249,9 +1278,11 @@ impl eframe::App for SolYanAirPlayApp {
                                         });
                                     }
 
-                                    ui.add_space(10.0);
+                                    ui.add_space(8.0);
+                                    let log_height = (ui.available_height() - 4.0).max(64.0);
                                     egui::ScrollArea::vertical()
                                         .id_salt("diagnostic-log-full")
+                                        .max_height(log_height)
                                         .auto_shrink([false, false])
                                         .stick_to_bottom(true)
                                         .show(ui, |ui| {
@@ -1272,7 +1303,12 @@ impl eframe::App for SolYanAirPlayApp {
             },
         );
 
-        self.draw_footer(ui);
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(footer_rect)
+                .layout(Layout::top_down(Align::Min)),
+            |ui| self.draw_footer(ui),
+        );
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
