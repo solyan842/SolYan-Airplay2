@@ -170,7 +170,7 @@ fn convert_native_to_stereo_i16(
 
 #[cfg(windows)]
 pub fn start_default_loopback(_requested: AudioFormat) -> Result<CaptureHandle> {
-    use wasapi::{get_default_device, initialize_mta, Direction, SampleType, ShareMode};
+    use wasapi::{get_default_device, initialize_mta, Direction, SampleType, StreamMode};
 
     const EVENT_POLL_MS: u32 = 250;
     const OUTPUT_BLOCK_FRAMES: usize = 1024;
@@ -228,18 +228,17 @@ pub fn start_default_loopback(_requested: AudioFormat) -> Result<CaptureHandle> 
                     return Err("WASAPI native format has zero channels".into());
                 }
 
-                let (default_period, _) = client
-                    .get_periods()
-                    .map_err(|e| format!("get_periods: {e}"))?;
+                let (_default_period, min_period) = client
+                    .get_device_period()
+                    .map_err(|e| format!("get_device_period: {e}"))?;
+
+                let mode = StreamMode::EventsShared {
+                    autoconvert: false,
+                    buffer_duration_hns: min_period,
+                };
 
                 client
-                    .initialize_client(
-                        &mix_format,
-                        default_period,
-                        &Direction::Capture,
-                        &ShareMode::Shared,
-                        true,
-                    )
+                    .initialize_client(&mix_format, &Direction::Capture, &mode)
                     .map_err(|e| format!("initialize native loopback client: {e}"))?;
 
                 let event = client
