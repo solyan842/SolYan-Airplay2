@@ -5,11 +5,11 @@ members = [
   "crates/airplay-core",
   "crates/audio-capture",
 ]
-exclude = ["vendor/airplay-audio"]
+exclude = ["vendor/airplay-audio", "vendor/airplay-resampler"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 license = "GPL-3.0-or-later"
 authors = ["SolYan"]
@@ -25,3 +25,4 @@ crossbeam-channel = "0.5"
 
 [patch."https://github.com/lmcgartland/airplay2-rs"]
 airplay-audio = { path = "vendor/airplay-audio" }
+airplay-resampler = { path = "vendor/airplay-resampler" }
