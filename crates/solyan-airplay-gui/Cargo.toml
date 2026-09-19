@@ -18,3 +18,5 @@ audio-capture = { path = "../audio-capture" }
 eframe = { version = "0.36.2", default-features = false, features = ["glow", "default_fonts", "persistence"] }
 
 base64 = "0.22"
+
+image = { version = "0.25", default-features = false, features = ["png"] }
