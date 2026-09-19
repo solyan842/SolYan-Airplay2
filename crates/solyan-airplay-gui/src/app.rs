@@ -81,7 +81,8 @@ pub struct SolYanAirPlayApp {
     progress_rx: Option<Receiver<StreamProgress>>,
     stream_control: Option<StreamControl>,
     progress: Option<StreamProgress>,
-    logo_texture: egui::TextureHandle,
+    logo_light_texture: egui::TextureHandle,
+    logo_dark_texture: egui::TextureHandle,
 }
 
 impl SolYanAirPlayApp {
@@ -93,17 +94,23 @@ impl SolYanAirPlayApp {
 
         theme::apply(&cc.egui_ctx, prefs.light_theme);
 
-        let logo_png = include_bytes!("../assets/solyan-airplay-logo.png");
-        let icon = eframe::icon_data::from_png_bytes(logo_png)
-            .expect("embedded SolYan AirPlay logo must be a valid PNG");
-        let logo_image = egui::ColorImage::from_rgba_unmultiplied(
-            [icon.width as usize, icon.height as usize],
-            &icon.rgba,
+        let load_logo = |name: &str, png: &[u8]| {
+            let icon = eframe::icon_data::from_png_bytes(png)
+                .expect("embedded SolYan AirPlay logo must be a valid PNG");
+            let image = egui::ColorImage::from_rgba_unmultiplied(
+                [icon.width as usize, icon.height as usize],
+                &icon.rgba,
+            );
+            cc.egui_ctx.load_texture(name, image, egui::TextureOptions::LINEAR)
+        };
+
+        let logo_light_texture = load_logo(
+            "solyan-airplay-logo-light",
+            include_bytes!("../assets/solyan-airplay-logo-light.png"),
         );
-        let logo_texture = cc.egui_ctx.load_texture(
-            "solyan-airplay-logo",
-            logo_image,
-            egui::TextureOptions::LINEAR,
+        let logo_dark_texture = load_logo(
+            "solyan-airplay-logo-dark",
+            include_bytes!("../assets/solyan-airplay-logo-dark.png"),
         );
 
         let (event_tx, event_rx) = unbounded();
@@ -122,7 +129,8 @@ impl SolYanAirPlayApp {
             progress_rx: None,
             stream_control: None,
             progress: None,
-            logo_texture,
+            logo_light_texture,
+            logo_dark_texture,
         };
 
         app.log("SolYan AirPlay2 v0.2.8 GUI initialized.");
@@ -511,7 +519,12 @@ impl SolYanAirPlayApp {
 
     fn draw_header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.image((self.logo_texture.id(), egui::vec2(46.0, 46.0)));
+            let logo = if self.prefs.light_theme {
+                &self.logo_light_texture
+            } else {
+                &self.logo_dark_texture
+            };
+            ui.image((logo.id(), egui::vec2(46.0, 46.0)));
             ui.add_space(8.0);
             ui.vertical(|ui| {
                 ui.label(
