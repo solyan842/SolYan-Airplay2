@@ -5,35 +5,34 @@ mod theme;
 mod worker;
 
 use app::SolYanAirPlayApp;
-use base64::Engine as _;
 use eframe::egui;
-use std::sync::Arc;
 
-fn embedded_logo_png() -> Vec<u8> {
-    base64::engine::general_purpose::STANDARD
-        .decode(concat!(include_str!("../assets/solyan-airplay-logo.0.b64"), include_str!("../assets/solyan-airplay-logo.1.b64"), include_str!("../assets/solyan-airplay-logo.2.b64"), include_str!("../assets/solyan-airplay-logo.3.b64")))
-        .expect("embedded SolYan AirPlay logo must decode")
+const APP_ICON_PNG: &[u8] = include_bytes!("../../../assets/solyan-airplay-logo-64.png");
+
+fn load_app_icon() -> egui::IconData {
+    match image::load_from_memory(APP_ICON_PNG) {
+        Ok(image) => {
+            let rgba = image.to_rgba8();
+            let (width, height) = rgba.dimensions();
+            egui::IconData {
+                rgba: rgba.into_raw(),
+                width,
+                height,
+            }
+        }
+        Err(_) => egui::IconData::default(),
+    }
 }
 
 fn main() -> eframe::Result {
-    let logo_png = embedded_logo_png();
-    let icon = eframe::icon_data::from_png_bytes(&logo_png)
-        .ok()
-        .map(Arc::new);
-
-    let mut viewport = egui::ViewportBuilder::default()
-        .with_title("SolYan AirPlay2")
-        .with_app_id("com.solyan.airplay2")
-        .with_inner_size([1280.0, 820.0])
-        .with_min_inner_size([1040.0, 700.0]);
-
-    if let Some(icon) = icon {
-        viewport = viewport.with_icon(icon);
-    }
-
     let native_options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
-        viewport,
+        viewport: egui::ViewportBuilder::default()
+            .with_title("SolYan AirPlay2")
+            .with_app_id("com.solyan.airplay2")
+            .with_icon(load_app_icon())
+            .with_inner_size([1360.0, 820.0])
+            .with_min_inner_size([1080.0, 700.0]),
         ..Default::default()
     };
 
