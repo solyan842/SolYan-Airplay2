@@ -101,7 +101,7 @@ impl SolYanAirPlayApp {
             progress: None,
         };
 
-        app.log("SolYan AirPlay2 v0.1.4 GUI initialized.");
+        app.log("SolYan AirPlay2 v0.1.5 GUI initialized.");
         app.start_scan(cc.egui_ctx.clone());
         app
     }
@@ -471,7 +471,7 @@ impl SolYanAirPlayApp {
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 device_icon(ui, kind, selected);
-                                ui.add_space(5.0);
+                                ui.add_space(10.0);
                                 ui.vertical(|ui| {
                                     ui.label(
                                         RichText::new(&device.name)
@@ -687,14 +687,14 @@ impl SolYanAirPlayApp {
                         egui::Slider::new(&mut self.prefs.render_delay_ms, 80..=600)
                             .suffix(" ms"),
                     );
-                    if ui.small_button("Low 100").clicked() {
-                        self.prefs.render_delay_ms = 100;
-                    }
-                    if ui.small_button("Stable 200").clicked() {
+                    if ui.small_button("Low 200").clicked() {
                         self.prefs.render_delay_ms = 200;
                     }
-                    if ui.small_button("Wi-Fi 350").clicked() {
+                    if ui.small_button("Stable 350").clicked() {
                         self.prefs.render_delay_ms = 350;
+                    }
+                    if ui.small_button("Safe 500").clicked() {
+                        self.prefs.render_delay_ms = 500;
                     }
                 });
             });
@@ -871,8 +871,10 @@ impl eframe::App for SolYanAirPlayApp {
         ui.horizontal(|ui| {
             let available_height = ui.available_height();
 
+            let device_panel_width = (ui.available_width() * 0.34).clamp(440.0, 620.0);
+
             ui.allocate_ui_with_layout(
-                egui::vec2(382.0, available_height),
+                egui::vec2(device_panel_width, available_height),
                 Layout::top_down(Align::Min),
                 |ui| {
                     theme::sidebar_card().show(ui, |ui| {
