@@ -32,6 +32,10 @@ fn main() -> eframe::Result {
     let native_options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
         viewport,
+        // Keep app preferences persisted, but never restore stale native
+        // window size/position. Eframe otherwise lets previous geometry
+        // override the startup maximized request.
+        persist_window: false,
         ..Default::default()
     };
 
