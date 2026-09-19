@@ -193,6 +193,13 @@ pub async fn run_live_stream(
         }
     }
 
+    // Latch the requested volume as soon as the RTSP session exists. Some
+    // receivers can briefly restore their previous hardware/session volume while
+    // RECORD/startup is still settling, so one post-start SET_PARAMETER is not
+    // sufficient on every launch.
+    let initial_volume = control.volume();
+    client.set_volume(initial_volume).await?;
+
     let mut capture = start_default_loopback(CaptureFormat::default())?;
     if capture.format.channels != CHANNELS as u16 || capture.format.bits_per_sample != 16 {
         let _ = client.disconnect().await;
@@ -249,8 +256,19 @@ pub async fn run_live_stream(
         }
     }
 
+    // Re-assert volume after RECORD, then twice more during the silence
+    // prebuffer window. This prevents the receiver from restoring a stale
+    // previous-session volume after our first SET_PARAMETER.
     let mut applied_volume = control.volume();
     client.set_volume(applied_volume).await?;
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    let desired_volume = control.volume();
+    client.set_volume(desired_volume).await?;
+    applied_volume = desired_volume;
+    tokio::time::sleep(Duration::from_millis(180)).await;
+    let desired_volume = control.volume();
+    client.set_volume(desired_volume).await?;
+    applied_volume = desired_volume;
 
     let started = Instant::now();
     let mut captured_chunks = 0u64;
