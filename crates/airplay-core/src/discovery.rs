@@ -43,8 +43,8 @@ pub async fn discover_once(timeout: Duration) -> Result<Vec<AirPlayReceiver>> {
 
             AirPlayReceiver {
                 id,
-                name: d.name,
-                model: d.model,
+                name: repair_mojibake(&d.name),
+                model: repair_mojibake(&d.model),
                 port: d.port,
                 addresses,
                 source_version,
@@ -76,5 +76,51 @@ impl AirPlayReceiver {
             .find(|value| value.parse::<IpAddr>().map(|ip| ip.is_ipv4()).unwrap_or(false))
             .or_else(|| self.addresses.first())
             .map(String::as_str)
+    }
+}
+
+
+fn repair_mojibake(input: &str) -> String {
+    // mDNS names should be UTF-8, but some Windows/network stacks surface UTF-8
+    // bytes as Latin-1 text (e.g. "Phòng" -> "PhÃ²ng"). Only attempt recovery
+    // when the string contains classic mojibake markers.
+    let suspicious = input.contains('Ã')
+        || input.contains('Â')
+        || input.contains('Æ')
+        || input.contains('á')
+        || input.contains('Ä');
+
+    if !suspicious {
+        return input.to_string();
+    }
+
+    let mut bytes = Vec::with_capacity(input.len());
+    for ch in input.chars() {
+        let code = ch as u32;
+        if code > 0xFF {
+            return input.to_string();
+        }
+        bytes.push(code as u8);
+    }
+
+    match String::from_utf8(bytes) {
+        Ok(decoded) => decoded,
+        Err(_) => input.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod unicode_tests {
+    use super::repair_mojibake;
+
+    #[test]
+    fn repairs_common_vietnamese_utf8_mojibake() {
+        assert_eq!(repair_mojibake("PhÃ²ng khÃ¡ch"), "Phòng khách");
+        assert_eq!(repair_mojibake("Loa bÃªn pháº£i"), "Loa bên phải");
+    }
+
+    #[test]
+    fn leaves_valid_unicode_unchanged() {
+        assert_eq!(repair_mojibake("Phòng khách"), "Phòng khách");
     }
 }
