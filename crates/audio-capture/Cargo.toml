@@ -12,3 +12,4 @@ crossbeam-channel.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 wasapi = "0.15"
+windows-sys = { version = "0.59", features = ["Win32_System_Threading"] }
