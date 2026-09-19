@@ -25,7 +25,7 @@ impl Default for Preferences {
     fn default() -> Self {
         Self {
             volume: 0.80,
-            render_delay_ms: 350,
+            render_delay_ms: 500,
             experimental_multiroom: false,
             last_receiver_id: None,
         }
@@ -83,10 +83,15 @@ impl SolYanAirPlayApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::apply(&cc.egui_ctx);
 
-        let prefs = cc
+        let mut prefs: Preferences = cc
             .storage
             .and_then(|storage| eframe::get_value(storage, PREFS_KEY))
             .unwrap_or_default();
+
+        // Migrate old low-latency settings to the clean-playback baseline.
+        if prefs.render_delay_ms < 350 {
+            prefs.render_delay_ms = 500;
+        }
 
         let logo_png = base64::engine::general_purpose::STANDARD
             .decode(concat!(include_str!("../assets/solyan-airplay-logo.0.b64"), include_str!("../assets/solyan-airplay-logo.1.b64"), include_str!("../assets/solyan-airplay-logo.2.b64"), include_str!("../assets/solyan-airplay-logo.3.b64")))
@@ -734,14 +739,14 @@ impl SolYanAirPlayApp {
                         egui::Slider::new(&mut self.prefs.render_delay_ms, 200..=800)
                             .suffix(" ms"),
                     );
-                    if ui.small_button("Stable 350").clicked() {
-                        self.prefs.render_delay_ms = 350;
-                    }
-                    if ui.small_button("Safer 500").clicked() {
+                    if ui.small_button("Stable 500").clicked() {
                         self.prefs.render_delay_ms = 500;
                     }
-                    if ui.small_button("Max 750").clicked() {
-                        self.prefs.render_delay_ms = 750;
+                    if ui.small_button("Safer 650").clicked() {
+                        self.prefs.render_delay_ms = 650;
+                    }
+                    if ui.small_button("Max 800").clicked() {
+                        self.prefs.render_delay_ms = 800;
                     }
                 });
             });
