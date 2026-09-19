@@ -78,6 +78,7 @@ pub struct SolYanAirPlayApp {
     progress_rx: Option<Receiver<StreamProgress>>,
     stream_control: Option<StreamControl>,
     progress: Option<StreamProgress>,
+    diagnostics_expanded: bool,
     logo_texture: egui::TextureHandle,
 }
 
@@ -121,10 +122,11 @@ impl SolYanAirPlayApp {
             progress_rx: None,
             stream_control: None,
             progress: None,
+            diagnostics_expanded: false,
             logo_texture,
         };
 
-        app.log("SolYan AirPlay2 v0.2.1 GUI initialized.");
+        app.log("SolYan AirPlay2 v0.2.2 GUI initialized.");
         app.start_scan(cc.egui_ctx.clone());
         app
     }
@@ -479,7 +481,7 @@ impl SolYanAirPlayApp {
 
     fn draw_header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.image((self.logo_texture.id(), egui::vec2(54.0, 54.0)));
+            ui.image((self.logo_texture.id(), egui::vec2(46.0, 46.0)));
             ui.add_space(8.0);
             ui.vertical(|ui| {
                 ui.label(
@@ -1121,7 +1123,7 @@ impl SolYanAirPlayApp {
                             .color(theme::ACCENT),
                     );
                     ui.label(
-                        RichText::new("· SolYan AirPlay2 v0.2.1")
+                        RichText::new("· SolYan AirPlay2 v0.2.2")
                             .size(11.5)
                             .strong()
                             .color(theme::TEXT),
@@ -1219,31 +1221,55 @@ impl eframe::App for SolYanAirPlayApp {
                         self.draw_multiroom_card(ui);
                         ui.add_space(10.0);
 
-                        // Diagnostics gets only the pixels that actually remain.
-                        // Its log scrolls internally instead of increasing body height.
-                        let diag_height = ui.available_height().max(120.0);
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(ui.available_width(), diag_height),
-                            Layout::top_down(Align::Min),
-                            |ui| {
-                                theme::card().show(ui, |ui| {
-                                    ui.set_min_height((diag_height - 4.0).max(110.0));
-                                    ui.horizontal(|ui| {
-                                        ui.label(
-                                            RichText::new("Diagnostics")
-                                                .size(17.0)
+                        // Diagnostics is a developer tool, not part of the primary
+                        // playback surface. Keep it collapsed unless explicitly opened.
+                        egui::Frame::new()
+                            .fill(theme::SIDEBAR)
+                            .stroke(Stroke::new(1.0, theme::BORDER))
+                            .corner_radius(egui::CornerRadius::same(10))
+                            .inner_margin(egui::Margin::symmetric(12, 8))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    let arrow = if self.diagnostics_expanded { "▴" } else { "▾" };
+                                    if ui
+                                        .button(
+                                            RichText::new(format!("Diagnostics  {arrow}"))
                                                 .strong()
                                                 .color(theme::TEXT),
-                                        );
-                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                            if ui.small_button("Clear log").clicked() {
-                                                self.logs.clear();
-                                            }
-                                        });
+                                        )
+                                        .clicked()
+                                    {
+                                        self.diagnostics_expanded = !self.diagnostics_expanded;
+                                    }
+
+                                    if !self.diagnostics_expanded {
+                                        if let Some(progress) = &self.progress {
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "Loss {:.3}%  ·  Retransmit {}  ·  Underruns {}",
+                                                    progress.loss_percent,
+                                                    progress.retransmit_requested,
+                                                    progress.underruns
+                                                ))
+                                                .size(10.5)
+                                                .color(theme::MUTED),
+                                            );
+                                        }
+                                    }
+
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        if self.diagnostics_expanded
+                                            && ui.small_button("Clear log").clicked()
+                                        {
+                                            self.logs.clear();
+                                        }
                                     });
+                                });
+
+                                if self.diagnostics_expanded {
+                                    ui.add_space(10.0);
 
                                     if let Some(progress) = &self.progress {
-                                        ui.add_space(10.0);
                                         ui.columns(4, |columns| {
                                             metric(
                                                 &mut columns[0],
@@ -1276,12 +1302,12 @@ impl eframe::App for SolYanAirPlayApp {
                                                 ),
                                             );
                                         });
+                                        ui.add_space(8.0);
                                     }
 
-                                    ui.add_space(8.0);
-                                    let log_height = (ui.available_height() - 4.0).max(64.0);
+                                    let log_height = ui.available_height().clamp(90.0, 260.0);
                                     egui::ScrollArea::vertical()
-                                        .id_salt("diagnostic-log-full")
+                                        .id_salt("diagnostic-log-collapsible")
                                         .max_height(log_height)
                                         .auto_shrink([false, false])
                                         .stick_to_bottom(true)
@@ -1295,9 +1321,8 @@ impl eframe::App for SolYanAirPlayApp {
                                                 );
                                             }
                                         });
-                                });
-                            },
-                        );
+                                }
+                            });
                     },
                 );
             },
