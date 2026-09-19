@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use crossbeam_channel::{bounded, Receiver};
+use crossbeam_channel::{bounded, Receiver, RecvTimeoutError};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -40,7 +40,24 @@ pub struct CaptureHandle {
 
 impl CaptureHandle {
     pub fn recv_timeout(&self, timeout: Duration) -> Result<CapturedChunk> {
-        self.rx.recv_timeout(timeout).map_err(|e| anyhow!(e))
+        match self.poll_timeout(timeout)? {
+            Some(chunk) => Ok(chunk),
+            None => Err(anyhow!("WASAPI capture timeout")),
+        }
+    }
+
+    /// Poll for PCM without treating a quiet Windows endpoint as a failure.
+    ///
+    /// Ok(None) means there was no audio packet inside the requested window.
+    /// A disconnected channel still reports a real capture-engine failure.
+    pub fn poll_timeout(&self, timeout: Duration) -> Result<Option<CapturedChunk>> {
+        match self.rx.recv_timeout(timeout) {
+            Ok(chunk) => Ok(Some(chunk)),
+            Err(RecvTimeoutError::Timeout) => Ok(None),
+            Err(RecvTimeoutError::Disconnected) => {
+                Err(anyhow!("WASAPI capture worker disconnected"))
+            }
+        }
     }
 
     pub fn stop(&mut self) {
@@ -64,11 +81,11 @@ pub fn start_default_loopback(format: AudioFormat) -> Result<CaptureHandle> {
     };
 
     if format.channels != 2 || format.bits_per_sample != 16 {
-        return Err(anyhow!("v0.1.0 capture requires stereo 16-bit PCM"));
+        return Err(anyhow!("SolYan AirPlay2 capture requires stereo 16-bit PCM"));
     }
 
     const CHUNK_FRAMES: usize = 352;
-    const EVENT_TIMEOUT_MS: u32 = 3_000;
+    const EVENT_POLL_MS: u32 = 250;
 
     let (tx, rx) = bounded::<CapturedChunk>(64);
     let (init_tx, init_rx) = std::sync::mpsc::sync_channel::<Result<String, String>>(1);
@@ -135,6 +152,10 @@ pub fn start_default_loopback(format: AudioFormat) -> Result<CaptureHandle> {
                 let chunk_bytes = CHUNK_FRAMES * bytes_per_frame;
 
                 while thread_running.load(Ordering::SeqCst) {
+                    if event.wait_for_event(EVENT_POLL_MS).is_err() {
+                        continue;
+                    }
+
                     capture
                         .read_from_device_to_deque(&mut bytes)
                         .map_err(|e| format!("capture read: {e}"))?;
@@ -153,13 +174,6 @@ pub fn start_default_loopback(format: AudioFormat) -> Result<CaptureHandle> {
                             sample_rate: target_rate,
                             channels: target_channels,
                         });
-                    }
-
-                    if event.wait_for_event(EVENT_TIMEOUT_MS).is_err()
-                        && thread_running.load(Ordering::SeqCst)
-                    {
-                        let _ = client.stop_stream();
-                        return Err("WASAPI event timeout".to_string());
                     }
                 }
 

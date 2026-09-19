@@ -1,4 +1,7 @@
 pub mod discovery;
+pub mod session;
+pub mod live;
+pub mod device_profile;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamMode {

@@ -3,8 +3,10 @@ name: Windows build
 on:
   push:
     branches: [main, "dev/**"]
-  pull_request:
-    branches: [main]
+
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -12,12 +14,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+
       - name: Check workspace
         run: cargo check --workspace --all-targets
+
       - name: Build release CLI
         run: cargo build --release -p solyan-airplay
-      - name: Upload executable
+
+      - name: Build release GUI
+        run: cargo build --release -p solyan-airplay-gui
+
+      - name: Upload Windows application
         uses: actions/upload-artifact@v4
         with:
-          name: SolYan-AirPlay2-Windows
-          path: target/release/solyan-airplay.exe
+          name: SolYan-AirPlay2-v0.1.4-Windows
+          path: |
+            target/release/SolYan-AirPlay2.exe
+            target/release/solyan-airplay.exe
