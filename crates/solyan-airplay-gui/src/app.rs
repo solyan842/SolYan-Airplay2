@@ -19,16 +19,18 @@ struct Preferences {
     experimental_multiroom: bool,
     last_receiver_id: Option<String>,
     vietnamese: bool,
+    light_theme: bool,
 }
 
 impl Default for Preferences {
     fn default() -> Self {
         Self {
             volume: 0.80,
-            render_delay_ms: 200,
+            render_delay_ms: 350,
             experimental_multiroom: false,
             last_receiver_id: None,
             vietnamese: true,
+            light_theme: true,
         }
     }
 }
@@ -84,12 +86,12 @@ pub struct SolYanAirPlayApp {
 
 impl SolYanAirPlayApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        theme::apply(&cc.egui_ctx);
-
-        let prefs = cc
+        let prefs: Preferences = cc
             .storage
             .and_then(|storage| eframe::get_value(storage, PREFS_KEY))
             .unwrap_or_default();
+
+        theme::apply(&cc.egui_ctx, prefs.light_theme);
 
         let logo_png = include_bytes!("../assets/solyan-airplay-logo.png");
         let icon = eframe::icon_data::from_png_bytes(logo_png)
@@ -123,7 +125,7 @@ impl SolYanAirPlayApp {
             logo_texture,
         };
 
-        app.log("SolYan AirPlay2 v0.2.6 GUI initialized.");
+        app.log("SolYan AirPlay2 v0.2.7 GUI initialized.");
         app.start_scan(cc.egui_ctx.clone());
         app
     }
@@ -147,7 +149,7 @@ impl SolYanAirPlayApp {
             .unwrap_or_else(|_| std::path::PathBuf::from("."));
         let desktop = base.join("Desktop");
         let dir = if desktop.is_dir() { desktop } else { base };
-        let path = dir.join("SolYan-AirPlay2-v0.2.6-log.txt");
+        let path = dir.join("SolYan-AirPlay2-v0.2.7-log.txt");
         match std::fs::write(&path, body) {
             Ok(()) => {
                 self.status = if self.prefs.vietnamese {
@@ -516,12 +518,12 @@ impl SolYanAirPlayApp {
                     RichText::new("SolYan AirPlay2")
                         .size(26.0)
                         .strong()
-                        .color(theme::TEXT),
+                        .color(theme::text()),
                 );
                 ui.label(
                     RichText::new("Stream Beyond Boundaries · Native Windows AirPlay 2")
                         .size(13.0)
-                        .color(theme::MUTED),
+                        .color(theme::muted()),
                 );
             });
 
@@ -552,17 +554,17 @@ impl SolYanAirPlayApp {
                 }
 
                 egui::Frame::new()
-                    .fill(theme::ACCENT_SOFT.gamma_multiply(0.72))
+                    .fill(theme::accent_soft().gamma_multiply(0.72))
                     .stroke(Stroke::new(1.0, theme::ACCENT.gamma_multiply(0.75)))
                     .corner_radius(egui::CornerRadius::same(16))
                     .inner_margin(egui::Margin::symmetric(4, 3))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 3.0;
-                            let vi_fill = if self.prefs.vietnamese { theme::ACCENT } else { theme::CARD };
-                            let en_fill = if self.prefs.vietnamese { theme::CARD } else { theme::ACCENT };
-                            let vi_text = if self.prefs.vietnamese { Color32::WHITE } else { theme::MUTED };
-                            let en_text = if self.prefs.vietnamese { theme::MUTED } else { Color32::WHITE };
+                            let vi_fill = if self.prefs.vietnamese { theme::ACCENT } else { theme::card_color() };
+                            let en_fill = if self.prefs.vietnamese { theme::card_color() } else { theme::ACCENT };
+                            let vi_text = if self.prefs.vietnamese { Color32::WHITE } else { theme::muted() };
+                            let en_text = if self.prefs.vietnamese { theme::muted() } else { Color32::WHITE };
 
                             if ui.add(
                                 egui::Button::new(RichText::new("VI").strong().color(vi_text))
@@ -585,11 +587,49 @@ impl SolYanAirPlayApp {
                             }
                         });
                     });
+
+                egui::Frame::new()
+                    .fill(theme::sidebar())
+                    .stroke(Stroke::new(1.0, theme::border()))
+                    .corner_radius(egui::CornerRadius::same(16))
+                    .inner_margin(egui::Margin::symmetric(4, 3))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 3.0;
+
+                            let light_fill = if self.prefs.light_theme { theme::ACCENT } else { theme::card_color() };
+                            let dark_fill = if self.prefs.light_theme { theme::card_color() } else { theme::ACCENT };
+                            let light_text = if self.prefs.light_theme { Color32::WHITE } else { theme::muted() };
+                            let dark_text = if self.prefs.light_theme { theme::muted() } else { Color32::WHITE };
+
+                            if ui.add(
+                                egui::Button::new(RichText::new(self.tr("Light", "Sáng")).strong().color(light_text))
+                                    .fill(light_fill)
+                                    .stroke(Stroke::new(1.0, theme::border()))
+                                    .corner_radius(egui::CornerRadius::same(12))
+                                    .min_size(egui::vec2(52.0, 28.0)),
+                            ).clicked() && !self.prefs.light_theme {
+                                self.prefs.light_theme = true;
+                                theme::apply(ui.ctx(), true);
+                            }
+
+                            if ui.add(
+                                egui::Button::new(RichText::new(self.tr("Dark", "Tối")).strong().color(dark_text))
+                                    .fill(dark_fill)
+                                    .stroke(Stroke::new(1.0, theme::border()))
+                                    .corner_radius(egui::CornerRadius::same(12))
+                                    .min_size(egui::vec2(48.0, 28.0)),
+                            ).clicked() && self.prefs.light_theme {
+                                self.prefs.light_theme = false;
+                                theme::apply(ui.ctx(), false);
+                            }
+                        });
+                    });
             });
         });
 
         ui.add_space(6.0);
-        ui.label(RichText::new(&self.status).color(theme::MUTED));
+        ui.label(RichText::new(&self.status).color(theme::muted()));
         if let Some(error) = &self.last_error {
             ui.add_space(3.0);
             ui.label(RichText::new(error).color(theme::RED));
@@ -598,7 +638,7 @@ impl SolYanAirPlayApp {
 
     fn draw_sidebar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label(RichText::new(self.tr("AIRPLAY DEVICES", "THIẾT BỊ AIRPLAY")).size(12.0).strong().color(theme::MUTED));
+            ui.label(RichText::new(self.tr("AIRPLAY DEVICES", "THIẾT BỊ AIRPLAY")).size(12.0).strong().color(theme::muted()));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let enabled = !self.activity.is_streaming();
                 if ui
@@ -616,7 +656,7 @@ impl SolYanAirPlayApp {
                 "Thiết bị đơn. Chọn thiết bị rồi nhấn Chạy.",
             ))
             .size(10.5)
-            .color(theme::MUTED),
+            .color(theme::muted()),
         );
         ui.add_space(8.0);
 
@@ -633,11 +673,11 @@ impl SolYanAirPlayApp {
             .show(ui, |ui| {
                 if self.devices.is_empty() {
                     theme::sidebar_card().show(ui, |ui| {
-                        ui.label(RichText::new(self.tr("No receiver yet", "Chưa có thiết bị")).strong().color(theme::TEXT));
+                        ui.label(RichText::new(self.tr("No receiver yet", "Chưa có thiết bị")).strong().color(theme::text()));
                         ui.label(
                             RichText::new(self.tr("Scan to find HomePod and AirPlay devices.", "Nhấn Quét để tìm HomePod và thiết bị AirPlay."))
                                 .size(12.0)
-                                .color(theme::MUTED),
+                                .color(theme::muted()),
                         );
                     });
                 }
@@ -646,11 +686,11 @@ impl SolYanAirPlayApp {
                     let selected = self.selected_pair_id.is_none()
                         && self.selected_ids.iter().any(|id| id == &device.id);
                     let fill = if selected {
-                        theme::ACCENT_SOFT
+                        theme::accent_soft()
                     } else {
-                        theme::SIDEBAR
+                        theme::sidebar()
                     };
-                    let border = if selected { theme::ACCENT } else { theme::BORDER };
+                    let border = if selected { theme::ACCENT } else { theme::border() };
                     let ip = device.preferred_address().unwrap_or("No address");
                     let kind = device.device_kind();
 
@@ -668,18 +708,18 @@ impl SolYanAirPlayApp {
                                         RichText::new(&device.name)
                                             .strong()
                                             .size(15.0)
-                                            .color(theme::TEXT),
+                                            .color(theme::text()),
                                     );
                                     ui.label(
                                         RichText::new(device.friendly_model_name())
                                             .size(12.0)
                                             .strong()
-                                            .color(if selected { theme::ACCENT } else { theme::TEXT }),
+                                            .color(if selected { theme::ACCENT } else { theme::text() }),
                                     );
                                     ui.label(
                                         RichText::new(format!("{}  •  {}", device.model, ip))
                                             .size(10.5)
-                                            .color(theme::MUTED),
+                                            .color(theme::muted()),
                                     );
                                 });
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -740,7 +780,7 @@ impl SolYanAirPlayApp {
         ui.horizontal(|ui| {
             ui.checkbox(
                 &mut self.prefs.experimental_multiroom,
-                RichText::new("Multiroom").strong().color(theme::TEXT),
+                RichText::new("Multiroom").strong().color(theme::text()),
             );
             ui.label(
                 RichText::new("EXPERIMENTAL")
@@ -752,7 +792,7 @@ impl SolYanAirPlayApp {
         ui.label(
             RichText::new(self.tr("Select 2+ devices. First one is the leader.", "Chọn từ 2 thiết bị. Thiết bị đầu tiên là trưởng nhóm."))
                 .size(11.5)
-                .color(theme::MUTED),
+                .color(theme::muted()),
         );
 
         if self.selected_pair_id.is_none()
@@ -771,7 +811,7 @@ impl SolYanAirPlayApp {
                 RichText::new(self.tr("HOMEPOD PAIR", "CẶP HOMEPOD"))
                     .size(12.0)
                     .strong()
-                    .color(theme::MUTED),
+                    .color(theme::muted()),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let enabled = !self.activity.is_streaming();
@@ -791,15 +831,15 @@ impl SolYanAirPlayApp {
                 "Cặp HomePod Stereo đã ghép trong ứng dụng Home.",
             ))
             .size(10.5)
-            .color(theme::MUTED),
+            .color(theme::muted()),
         );
         ui.add_space(7.0);
         let mut clicked_pair_id: Option<String> = None;
 
         if self.homepod_pairs.is_empty() {
             egui::Frame::new()
-                .fill(theme::SIDEBAR)
-                .stroke(Stroke::new(1.0, theme::BORDER))
+                .fill(theme::sidebar())
+                .stroke(Stroke::new(1.0, theme::border()))
                 .corner_radius(egui::CornerRadius::same(12))
                 .inner_margin(egui::Margin::same(12))
                 .show(ui, |ui| {
@@ -807,7 +847,7 @@ impl SolYanAirPlayApp {
                         RichText::new(self.tr("No HomePod stereo pair detected", "Chưa tìm thấy cặp HomePod Stereo"))
                             .size(12.0)
                             .strong()
-                            .color(theme::TEXT),
+                            .color(theme::text()),
                     );
                     ui.label(
                         RichText::new(self.tr(
@@ -815,14 +855,14 @@ impl SolYanAirPlayApp {
                             "Cặp HomePod Stereo từ ứng dụng Home. Chọn cặp để phát stereo.",
                         ))
                         .size(10.0)
-                        .color(theme::MUTED),
+                        .color(theme::muted()),
                     );
                 });
         } else {
             for pair in &self.homepod_pairs {
                 let selected = self.selected_pair_id.as_deref() == Some(pair.id.as_str());
-                let fill = if selected { theme::ACCENT_SOFT } else { theme::SIDEBAR };
-                let border = if selected { theme::ACCENT } else { theme::BORDER };
+                let fill = if selected { theme::accent_soft() } else { theme::sidebar() };
+                let border = if selected { theme::ACCENT } else { theme::border() };
 
                 let response = egui::Frame::new()
                     .fill(fill)
@@ -838,12 +878,12 @@ impl SolYanAirPlayApp {
                                     RichText::new(&pair.name)
                                         .size(14.5)
                                         .strong()
-                                        .color(theme::TEXT),
+                                        .color(theme::text()),
                                 );
                                 ui.label(
                                     RichText::new(pair.member_names.join("  +  "))
                                         .size(10.5)
-                                        .color(theme::MUTED),
+                                        .color(theme::muted()),
                                 );
                                 ui.horizontal_wrapped(|ui| {
                                     capability_badge(ui, "STEREO PAIR", true, true);
@@ -891,7 +931,7 @@ impl SolYanAirPlayApp {
                 ui.vertical(|ui| {
                     ui.label(
                         RichText::new(self.tr("NOW STREAMING", "ĐANG PHÁT"))
-                            .size(11.0).strong().color(theme::MUTED),
+                            .size(11.0).strong().color(theme::muted()),
                     );
                     let names = self.selected_name_list();
                     let title = if names.is_empty() {
@@ -899,7 +939,7 @@ impl SolYanAirPlayApp {
                     } else {
                         names.join("  +  ")
                     };
-                    ui.label(RichText::new(title).size(21.0).strong().color(theme::TEXT));
+                    ui.label(RichText::new(title).size(21.0).strong().color(theme::text()));
                     ui.add_space(6.0);
                     self.draw_start_stop_button(ui);
                 });
@@ -908,7 +948,7 @@ impl SolYanAirPlayApp {
                     ui.vertical(|ui| {
                         ui.label(
                             RichText::new(self.tr("NOW STREAMING", "ĐANG PHÁT"))
-                                .size(11.0).strong().color(theme::MUTED),
+                                .size(11.0).strong().color(theme::muted()),
                         );
                         let names = self.selected_name_list();
                         let title = if names.is_empty() {
@@ -916,7 +956,7 @@ impl SolYanAirPlayApp {
                         } else {
                             names.join("  +  ")
                         };
-                        ui.label(RichText::new(title).size(22.0).strong().color(theme::TEXT));
+                        ui.label(RichText::new(title).size(22.0).strong().color(theme::text()));
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         self.draw_start_stop_button(ui);
@@ -1009,7 +1049,7 @@ impl SolYanAirPlayApp {
         theme::card().show(ui, |ui| {
             ui.label(
                 RichText::new(self.tr("Playback", "Điều khiển"))
-                    .size(17.0).strong().color(theme::TEXT),
+                    .size(17.0).strong().color(theme::text()),
             );
             ui.label(
                 RichText::new(self.tr(
@@ -1017,13 +1057,13 @@ impl SolYanAirPlayApp {
                     "Điều chỉnh âm lượng và độ trễ. 200 ms cho phản hồi nhanh; tăng 350–500 ms nếu cần ổn định hơn.",
                 ))
                 .size(10.5)
-                .color(theme::MUTED),
+                .color(theme::muted()),
             );
             ui.add_space(10.0);
 
             ui.label(
                 RichText::new(self.tr("Volume", "Âm lượng"))
-                    .size(12.0).strong().color(theme::TEXT),
+                    .size(12.0).strong().color(theme::text()),
             );
             ui.horizontal_wrapped(|ui| {
                 let slider_w = (ui.available_width() - 100.0).clamp(180.0, 420.0);
@@ -1031,9 +1071,9 @@ impl SolYanAirPlayApp {
                     ui.spacing_mut().slider_width = slider_w;
                     let visuals = ui.visuals_mut();
                     visuals.slider_trailing_fill = true;
-                    visuals.widgets.inactive.bg_fill = Color32::from_rgb(54, 55, 64);
-                    visuals.widgets.inactive.bg_stroke = Stroke::new(1.2, Color32::from_rgb(95, 98, 112));
-                    visuals.widgets.hovered.bg_fill = theme::ACCENT_SOFT;
+                    visuals.widgets.inactive.bg_fill = theme::control_bg();
+                    visuals.widgets.inactive.bg_stroke = Stroke::new(1.2, theme::control_border());
+                    visuals.widgets.hovered.bg_fill = theme::accent_soft();
                     visuals.widgets.hovered.bg_stroke = Stroke::new(1.8, theme::ACCENT);
                     visuals.widgets.active.bg_fill = theme::ACCENT;
                     ui.add(
@@ -1044,7 +1084,7 @@ impl SolYanAirPlayApp {
                   .on_hover_text(self.tr("Drag to change volume", "Kéo để thay đổi âm lượng"));
 
                 egui::Frame::new()
-                    .fill(theme::ACCENT_SOFT)
+                    .fill(theme::accent_soft())
                     .stroke(Stroke::new(1.2, theme::ACCENT))
                     .corner_radius(egui::CornerRadius::same(8))
                     .inner_margin(egui::Margin::symmetric(12, 6))
@@ -1065,7 +1105,7 @@ impl SolYanAirPlayApp {
             ui.add_space(10.0);
             ui.label(
                 RichText::new(self.tr("Latency", "Độ trễ"))
-                    .size(12.0).strong().color(theme::TEXT),
+                    .size(12.0).strong().color(theme::text()),
             );
 
             let enabled = !self.activity.is_streaming();
@@ -1075,9 +1115,9 @@ impl SolYanAirPlayApp {
                     ui.spacing_mut().slider_width = slider_w;
                     let visuals = ui.visuals_mut();
                     visuals.slider_trailing_fill = true;
-                    visuals.widgets.inactive.bg_fill = Color32::from_rgb(54, 55, 64);
-                    visuals.widgets.inactive.bg_stroke = Stroke::new(1.2, Color32::from_rgb(95, 98, 112));
-                    visuals.widgets.hovered.bg_fill = theme::ACCENT_SOFT;
+                    visuals.widgets.inactive.bg_fill = theme::control_bg();
+                    visuals.widgets.inactive.bg_stroke = Stroke::new(1.2, theme::control_border());
+                    visuals.widgets.hovered.bg_fill = theme::accent_soft();
                     visuals.widgets.hovered.bg_stroke = Stroke::new(1.8, theme::ACCENT);
                     visuals.widgets.active.bg_fill = theme::ACCENT;
                     ui.add(
@@ -1090,10 +1130,10 @@ impl SolYanAirPlayApp {
                 ui.add_space(6.0);
                 ui.horizontal_wrapped(|ui| {
                     let preset = |ui: &mut egui::Ui, label: &str, selected: bool| {
-                        let fill = if selected { theme::ACCENT_SOFT } else { Color32::from_rgb(34, 35, 42) };
-                        let stroke = if selected { theme::ACCENT } else { Color32::from_rgb(86, 89, 102) };
+                        let fill = if selected { theme::accent_soft() } else { theme::control_bg() };
+                        let stroke = if selected { theme::ACCENT } else { theme::control_border() };
                         ui.add(
-                            egui::Button::new(RichText::new(label).strong().color(theme::TEXT))
+                            egui::Button::new(RichText::new(label).strong().color(theme::text()))
                                 .fill(fill)
                                 .stroke(Stroke::new(1.2, stroke))
                                 .corner_radius(egui::CornerRadius::same(8))
@@ -1118,8 +1158,8 @@ impl SolYanAirPlayApp {
                 let test_audio = egui::Button::new(
                     RichText::new(self.tr("Test Windows audio", "Test âm thanh")).strong(),
                 )
-                .fill(Color32::from_rgb(34, 35, 42))
-                .stroke(Stroke::new(1.2, Color32::from_rgb(86, 89, 102)))
+                .fill(theme::control_bg())
+                .stroke(Stroke::new(1.2, theme::control_border()))
                 .corner_radius(egui::CornerRadius::same(8))
                 .min_size(egui::vec2(128.0, 34.0));
                 if ui.add_enabled(enabled, test_audio).clicked() {
@@ -1129,8 +1169,8 @@ impl SolYanAirPlayApp {
                 let test_airplay = egui::Button::new(
                     RichText::new(self.tr("Test AirPlay session", "Test AirPlay")).strong(),
                 )
-                .fill(Color32::from_rgb(34, 35, 42))
-                .stroke(Stroke::new(1.2, Color32::from_rgb(86, 89, 102)))
+                .fill(theme::control_bg())
+                .stroke(Stroke::new(1.2, theme::control_border()))
                 .corner_radius(egui::CornerRadius::same(8))
                 .min_size(egui::vec2(116.0, 34.0));
                 if ui
@@ -1150,7 +1190,7 @@ impl SolYanAirPlayApp {
                     RichText::new("Multiroom")
                         .size(17.0)
                         .strong()
-                        .color(theme::TEXT),
+                        .color(theme::text()),
                 );
                 ui.label(
                     RichText::new("EXPERIMENTAL")
@@ -1164,7 +1204,7 @@ impl SolYanAirPlayApp {
             if !self.prefs.experimental_multiroom {
                 ui.label(
                     RichText::new(self.tr("Enable to stream to multiple devices.", "Bật để phát tới nhiều thiết bị."))
-                    .color(theme::MUTED),
+                    .color(theme::muted()),
                 );
                 return;
             }
@@ -1190,15 +1230,15 @@ impl SolYanAirPlayApp {
             ui.label(
                 RichText::new(self.tr("PTP synchronized group playback.", "Phát nhóm đồng bộ bằng PTP."))
                 .size(11.5)
-                .color(theme::MUTED),
+                .color(theme::muted()),
             );
         });
     }
 
     fn draw_footer(&self, ui: &mut egui::Ui) {
         egui::Frame::new()
-            .fill(theme::SIDEBAR)
-            .stroke(Stroke::new(1.0, theme::BORDER))
+            .fill(theme::sidebar())
+            .stroke(Stroke::new(1.0, theme::border()))
             .corner_radius(egui::CornerRadius::same(8))
             .inner_margin(egui::Margin::symmetric(12, 7))
             .show(ui, |ui| {
@@ -1210,16 +1250,16 @@ impl SolYanAirPlayApp {
                             .color(theme::ACCENT),
                     );
                     ui.label(
-                        RichText::new("· SolYan AirPlay2 v0.2.6")
+                        RichText::new("· SolYan AirPlay2 v0.2.7")
                             .size(11.5)
                             .strong()
-                            .color(theme::TEXT),
+                            .color(theme::text()),
                     );
                     ui.label(
                         RichText::new(self.tr("· Developer: SolYan ·", "· Tác giả: SolYan ·"))
                             .size(11.5)
                             .strong()
-                            .color(theme::TEXT),
+                            .color(theme::text()),
                     );
                     ui.hyperlink_to(
                         RichText::new("https://www.youtube.com/@SolYan-Music")
@@ -1252,7 +1292,7 @@ impl eframe::App for SolYanAirPlayApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         ui.painter()
-            .rect_filled(ui.max_rect(), egui::CornerRadius::ZERO, theme::BG);
+            .rect_filled(ui.max_rect(), egui::CornerRadius::ZERO, theme::bg());
 
         ui.add_space(4.0);
         self.draw_header(ui);
@@ -1283,7 +1323,7 @@ impl eframe::App for SolYanAirPlayApp {
             this.draw_multiroom_card(ui);
             ui.add_space(10.0);
             egui::Frame::new()
-                .fill(theme::ACCENT_SOFT.gamma_multiply(0.45))
+                .fill(theme::accent_soft().gamma_multiply(0.45))
                 .stroke(Stroke::new(1.0, theme::ACCENT.gamma_multiply(0.35)))
                 .corner_radius(egui::CornerRadius::same(10))
                 .inner_margin(egui::Margin::symmetric(12, 8))
@@ -1294,7 +1334,7 @@ impl eframe::App for SolYanAirPlayApp {
                             "AirPlay có thể xảy ra trễ hoặc lệch tiếng/hình do cơ chế đệm và đồng bộ của giao thức.",
                         ))
                         .size(10.5)
-                        .color(theme::MUTED),
+                        .color(theme::muted()),
                     );
                 });
             ui.add_space(6.0);
@@ -1382,10 +1422,10 @@ fn metric(ui: &mut egui::Ui, label: &str, value: &str, detail: &str) {
         RichText::new(label.to_uppercase())
             .size(10.0)
             .strong()
-            .color(theme::MUTED),
+            .color(theme::muted()),
     );
-    ui.label(RichText::new(value).size(16.0).strong().color(theme::TEXT));
-    ui.label(RichText::new(detail).size(10.5).color(theme::MUTED));
+    ui.label(RichText::new(value).size(16.0).strong().color(theme::text()));
+    ui.label(RichText::new(detail).size(10.5).color(theme::muted()));
 }
 
 fn capability_badge(ui: &mut egui::Ui, label: &str, enabled: bool, experimental: bool) {
@@ -1394,7 +1434,7 @@ fn capability_badge(ui: &mut egui::Ui, label: &str, enabled: bool, experimental:
     } else if enabled {
         theme::GREEN
     } else {
-        theme::MUTED
+        theme::muted()
     };
 
     egui::Frame::new()
@@ -1412,7 +1452,7 @@ fn capability_badge(ui: &mut egui::Ui, label: &str, enabled: bool, experimental:
 fn stereo_pair_icon(ui: &mut egui::Ui, selected: bool) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(58.0, 48.0), Sense::hover());
     let painter = ui.painter_at(rect);
-    let fg = if selected { theme::ACCENT } else { theme::TEXT };
+    let fg = if selected { theme::ACCENT } else { theme::text() };
     let soft = fg.gamma_multiply(0.14);
     let center = rect.center();
 
@@ -1466,7 +1506,7 @@ fn device_sort_rank(kind: DeviceKind) -> u8 {
 fn device_icon(ui: &mut egui::Ui, kind: DeviceKind, selected: bool) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(48.0, 48.0), Sense::hover());
     let painter = ui.painter_at(rect);
-    let fg = if selected { theme::ACCENT } else { theme::TEXT };
+    let fg = if selected { theme::ACCENT } else { theme::text() };
     let soft = fg.gamma_multiply(0.16);
     let center = rect.center();
 

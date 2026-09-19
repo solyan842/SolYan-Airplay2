@@ -1,22 +1,49 @@
 use eframe::egui::{self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, Frame, Margin, Stroke};
+use std::sync::atomic::{AtomicBool, Ordering};
 
-pub const BG: Color32 = Color32::from_rgb(12, 13, 16);
-pub const SIDEBAR: Color32 = Color32::from_rgb(17, 18, 22);
-pub const CARD: Color32 = Color32::from_rgb(23, 24, 29);
-pub const CARD_HOVER: Color32 = Color32::from_rgb(29, 30, 36);
-pub const BORDER: Color32 = Color32::from_rgb(47, 49, 58);
-pub const TEXT: Color32 = Color32::from_rgb(238, 239, 242);
-pub const MUTED: Color32 = Color32::from_rgb(151, 154, 166);
-pub const ACCENT: Color32 = Color32::from_rgb(255, 132, 43);
-pub const ACCENT_SOFT: Color32 = Color32::from_rgb(66, 39, 22);
-pub const GREEN: Color32 = Color32::from_rgb(87, 205, 128);
-pub const RED: Color32 = Color32::from_rgb(239, 99, 99);
-pub const BLUE: Color32 = Color32::from_rgb(95, 164, 255);
+static LIGHT_MODE: AtomicBool = AtomicBool::new(true);
 
-pub fn apply(ctx: &egui::Context) {
-    // Use the native Windows UI font first. Segoe UI contains the full
-    // Vietnamese glyph set and avoids tofu squares for names such as
-    // "Phòng ngủ". Fall back to egui defaults if Windows font loading fails.
+pub const ACCENT: Color32 = Color32::from_rgb(255, 149, 0);
+pub const GREEN: Color32 = Color32::from_rgb(52, 199, 89);
+pub const RED: Color32 = Color32::from_rgb(255, 69, 58);
+pub const BLUE: Color32 = Color32::from_rgb(0, 122, 255);
+
+pub fn is_light() -> bool { LIGHT_MODE.load(Ordering::Relaxed) }
+
+pub fn bg() -> Color32 {
+    if is_light() { Color32::from_rgb(246, 246, 248) } else { Color32::from_rgb(12, 13, 16) }
+}
+pub fn sidebar() -> Color32 {
+    if is_light() { Color32::from_rgb(250, 250, 252) } else { Color32::from_rgb(17, 18, 22) }
+}
+pub fn card_color() -> Color32 {
+    if is_light() { Color32::WHITE } else { Color32::from_rgb(23, 24, 29) }
+}
+pub fn card_hover() -> Color32 {
+    if is_light() { Color32::from_rgb(242, 242, 247) } else { Color32::from_rgb(29, 30, 36) }
+}
+pub fn border() -> Color32 {
+    if is_light() { Color32::from_rgb(218, 218, 223) } else { Color32::from_rgb(47, 49, 58) }
+}
+pub fn text() -> Color32 {
+    if is_light() { Color32::from_rgb(28, 28, 30) } else { Color32::from_rgb(238, 239, 242) }
+}
+pub fn muted() -> Color32 {
+    if is_light() { Color32::from_rgb(99, 99, 102) } else { Color32::from_rgb(151, 154, 166) }
+}
+pub fn accent_soft() -> Color32 {
+    if is_light() { Color32::from_rgb(255, 239, 220) } else { Color32::from_rgb(66, 39, 22) }
+}
+pub fn control_bg() -> Color32 {
+    if is_light() { Color32::from_rgb(248, 248, 250) } else { Color32::from_rgb(34, 35, 42) }
+}
+pub fn control_border() -> Color32 {
+    if is_light() { Color32::from_rgb(198, 198, 204) } else { Color32::from_rgb(86, 89, 102) }
+}
+
+pub fn apply(ctx: &egui::Context, light: bool) {
+    LIGHT_MODE.store(light, Ordering::Relaxed);
+
     #[cfg(windows)]
     {
         let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".to_owned());
@@ -37,8 +64,10 @@ pub fn apply(ctx: &egui::Context) {
         }
     }
 
-    ctx.set_theme(egui::Theme::Dark);
-    let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
+    let selected_theme = if light { egui::Theme::Light } else { egui::Theme::Dark };
+    ctx.set_theme(selected_theme);
+    let mut style = (*ctx.style_of(selected_theme)).clone();
+
     style.spacing.item_spacing = egui::vec2(10.0, 10.0);
     style.spacing.button_padding = egui::vec2(14.0, 9.0);
     style.spacing.interact_size = egui::vec2(42.0, 30.0);
@@ -47,43 +76,43 @@ pub fn apply(ctx: &egui::Context) {
     style.spacing.icon_width = 18.0;
     style.spacing.icon_width_inner = 11.0;
 
-    let mut visuals = egui::Visuals::dark();
-    visuals.panel_fill = BG;
-    visuals.window_fill = CARD;
-    visuals.extreme_bg_color = SIDEBAR;
-    visuals.faint_bg_color = CARD;
+    let mut visuals = if light { egui::Visuals::light() } else { egui::Visuals::dark() };
+    visuals.panel_fill = bg();
+    visuals.window_fill = card_color();
+    visuals.extreme_bg_color = sidebar();
+    visuals.faint_bg_color = card_color();
     visuals.selection.bg_fill = ACCENT;
     visuals.selection.stroke = Stroke::new(2.0, ACCENT);
     visuals.slider_trailing_fill = true;
-    visuals.widgets.inactive.bg_fill = Color32::from_rgb(32, 33, 39);
-    visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(29, 30, 36);
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.1, Color32::from_rgb(76, 79, 91));
-    visuals.widgets.inactive.fg_stroke = Stroke::new(1.1, TEXT);
-    visuals.widgets.hovered.bg_fill = ACCENT_SOFT;
-    visuals.widgets.hovered.weak_bg_fill = ACCENT_SOFT;
+    visuals.widgets.inactive.bg_fill = control_bg();
+    visuals.widgets.inactive.weak_bg_fill = card_hover();
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.1, control_border());
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.1, text());
+    visuals.widgets.hovered.bg_fill = accent_soft();
+    visuals.widgets.hovered.weak_bg_fill = accent_soft();
     visuals.widgets.hovered.bg_stroke = Stroke::new(1.6, ACCENT);
-    visuals.widgets.hovered.fg_stroke = Stroke::new(1.3, TEXT);
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.3, text());
     visuals.widgets.active.bg_fill = ACCENT;
-    visuals.widgets.active.weak_bg_fill = ACCENT_SOFT;
+    visuals.widgets.active.weak_bg_fill = accent_soft();
     visuals.widgets.active.bg_stroke = Stroke::new(1.8, ACCENT);
-    visuals.widgets.open.bg_fill = CARD_HOVER;
+    visuals.widgets.open.bg_fill = card_hover();
     style.visuals = visuals;
 
-    ctx.set_style_of(egui::Theme::Dark, style);
+    ctx.set_style_of(selected_theme, style);
 }
 
 pub fn card() -> Frame {
     Frame::new()
-        .fill(CARD)
-        .stroke(Stroke::new(1.0, BORDER))
-        .corner_radius(CornerRadius::same(14))
+        .fill(card_color())
+        .stroke(Stroke::new(1.0, border()))
+        .corner_radius(CornerRadius::same(16))
         .inner_margin(Margin::same(16))
 }
 
 pub fn sidebar_card() -> Frame {
     Frame::new()
-        .fill(SIDEBAR)
-        .stroke(Stroke::new(1.0, BORDER))
-        .corner_radius(CornerRadius::same(14))
+        .fill(sidebar())
+        .stroke(Stroke::new(1.0, border()))
+        .corner_radius(CornerRadius::same(16))
         .inner_margin(Margin::same(14))
 }
