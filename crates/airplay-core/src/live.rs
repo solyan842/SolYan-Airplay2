@@ -323,7 +323,7 @@ pub async fn run_live_stream(
                     let frame = LivePcmFrame {
                         samples,
                         channels: CHANNELS,
-                        sample_rate: SAMPLE_RATE,
+                        sample_rate: source_rate,
                     };
 
                     if sender.send(frame) {
