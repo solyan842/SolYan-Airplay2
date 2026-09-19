@@ -33,3 +33,7 @@ mockall = "0.12"
 test-case = "3.3"
 proptest = "1.4"
 hound = "3.5"
+
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Threading"] }
