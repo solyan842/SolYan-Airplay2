@@ -734,14 +734,14 @@ impl SolYanAirPlayApp {
                         egui::Slider::new(&mut self.prefs.render_delay_ms, 200..=800)
                             .suffix(" ms"),
                     );
-                    if ui.small_button("Safer 500").clicked() {
-                        self.prefs.render_delay_ms = 750;
-                    }
                     if ui.small_button("Stable 350").clicked() {
                         self.prefs.render_delay_ms = 350;
                     }
-                    if ui.small_button("Max 750").clicked() {
+                    if ui.small_button("Safer 500").clicked() {
                         self.prefs.render_delay_ms = 500;
+                    }
+                    if ui.small_button("Max 750").clicked() {
+                        self.prefs.render_delay_ms = 750;
                     }
                 });
             });
@@ -945,7 +945,7 @@ impl eframe::App for SolYanAirPlayApp {
         self.draw_header(ui);
         ui.add_space(12.0);
 
-        let footer_height = 30.0;
+        let footer_height = 36.0;
         let body_height = (ui.available_height() - footer_height).max(420.0);
 
         ui.allocate_ui_with_layout(
