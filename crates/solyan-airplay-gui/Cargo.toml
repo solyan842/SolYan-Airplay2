@@ -1,0 +1,28 @@
+[package]
+name = "solyan-airplay-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "SolYan-AirPlay2"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+tokio.workspace = true
+crossbeam-channel.workspace = true
+solyan-airplay-core = { path = "../airplay-core" }
+audio-capture = { path = "../audio-capture" }
+eframe = { version = "0.36.2", default-features = false, features = ["glow", "default_fonts", "persistence"] }
+base64 = "0.22"
+
+[build-dependencies]
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png"] }
+ico = "0.4"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"

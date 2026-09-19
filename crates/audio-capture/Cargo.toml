@@ -11,4 +11,5 @@ thiserror.workspace = true
 crossbeam-channel.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-wasapi = "0.15"
+wasapi = "0.23"
+windows-sys = { version = "0.59", features = ["Win32_System_Threading"] }
