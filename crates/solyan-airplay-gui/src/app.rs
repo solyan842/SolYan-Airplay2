@@ -1039,8 +1039,6 @@ impl SolYanAirPlayApp {
             };
 
             if ui.available_width() < 620.0 {
-                metric(ui, "Source", "Windows system audio", "WASAPI loopback");
-                ui.add_space(8.0);
                 metric(ui, "Protocol", protocol, timing);
                 ui.add_space(8.0);
                 metric(
@@ -1050,11 +1048,10 @@ impl SolYanAirPlayApp {
                     "Retransmit headroom",
                 );
             } else {
-                ui.columns(3, |columns| {
-                    metric(&mut columns[0], "Source", "Windows system audio", "WASAPI loopback");
-                    metric(&mut columns[1], "Protocol", protocol, timing);
+                ui.columns(2, |columns| {
+                    metric(&mut columns[0], "Protocol", protocol, timing);
                     metric(
-                        &mut columns[2],
+                        &mut columns[1],
                         "Render lead",
                         &format!("{} ms", self.prefs.render_delay_ms),
                         "Retransmit headroom",
