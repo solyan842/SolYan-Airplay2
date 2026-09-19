@@ -1334,7 +1334,7 @@ impl eframe::App for SolYanAirPlayApp {
             self.handle_event(event);
         }
 
-        if let Some(rx) = &self.progress_rx {
+        if let Some(rx) = self.progress_rx.clone() {
             while let Ok(progress) = rx.try_recv() {
                 if self.activity == Activity::PreparingStream
                     && progress.captured_chunks > 0
