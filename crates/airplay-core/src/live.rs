@@ -162,6 +162,9 @@ pub async fn run_live_stream(
     const SILENCE_POLL: Duration = Duration::from_millis(8);
     const ACTIVE_POLL: Duration = Duration::from_millis(20);
     const SILENCE_GRACE: Duration = Duration::from_millis(120);
+    // Synthetic silence must never be allowed to build a long backlog.
+    // Four 1024-frame source chunks are ~85-93ms at common 48/44.1k rates.
+    const MAX_SYNTHETIC_QUEUE_CHUNKS: usize = 4;
     const TRANSITION_MS: u32 = 2;
 
     let mut stream_config = StreamConfig::default();
@@ -208,6 +211,8 @@ pub async fn run_live_stream(
     let source_block_frames: usize = 1024;
     let transition_frames =
         ((source_rate as u64 * TRANSITION_MS as u64) / 1000).max(1) as usize;
+    let silence_chunk_period =
+        Duration::from_secs_f64(source_block_frames as f64 / source_rate as f64);
 
     tracing::info!(
         "Live source format: {} Hz stereo i16 -> AirPlay {} Hz / {} frames per packet",
@@ -262,6 +267,7 @@ pub async fn run_live_stream(
     let mut last_samples = vec![0i16; CHANNELS as usize];
     let mut next_feedback = Instant::now() + Duration::from_secs(2);
     let mut next_progress = Instant::now() + Duration::from_millis(500);
+    let mut next_silence_at = Instant::now();
 
     while !control.is_stopped() {
         let poll_window = if in_silence { SILENCE_POLL } else { ACTIVE_POLL };
@@ -301,55 +307,61 @@ pub async fn run_live_stream(
             }
             None => {
                 late_polls += 1;
+                let now = Instant::now();
 
                 if !in_silence {
                     let grace_elapsed = last_real_at
                         .map(|t| t.elapsed() >= SILENCE_GRACE)
                         .unwrap_or(false);
 
-                    // A short WASAPI scheduling gap is normal. Do NOT inject a zero
-                    // packet here: the 400-500ms audio buffer is specifically there
-                    // to absorb this jitter. Inserting zero after one late poll was
-                    // the source of intermittent clicks in v0.1.5.
-                    if !grace_elapsed {
-                        continue;
+                    // A short WASAPI scheduling gap is normal. Do not manufacture
+                    // audio during the grace window, but still fall through to the
+                    // feedback/progress logic below so the AirPlay session stays alive.
+                    if grace_elapsed {
+                        let samples = ramp_to_zero(
+                            &last_samples,
+                            CHANNELS as usize,
+                            source_block_frames,
+                            transition_frames,
+                        );
+                        let frame = LivePcmFrame {
+                            samples,
+                            channels: CHANNELS,
+                            sample_rate: source_rate,
+                        };
+
+                        // Synthetic audio is never allowed to block the producer.
+                        // If the decoder already has enough buffered material, wait
+                        // for it to drain instead of building a silence backlog.
+                        if sender.queued_frames() < MAX_SYNTHETIC_QUEUE_CHUNKS
+                            && sender.try_send(frame)
+                        {
+                            silence_chunks += 1;
+                            silence_transitions += 1;
+                            in_silence = true;
+                            last_samples.fill(0);
+                            next_silence_at = now + silence_chunk_period;
+                        }
+                    }
+                } else if now >= next_silence_at {
+                    // Keep the timeline alive at the source block cadence, not at
+                    // the poll cadence. The previous implementation could enqueue
+                    // ~23ms of silence every 8ms and keep a large queue full across
+                    // a track transition.
+                    if sender.queued_frames() < MAX_SYNTHETIC_QUEUE_CHUNKS {
+                        let frame = LivePcmFrame {
+                            samples: vec![0; source_block_frames * CHANNELS as usize],
+                            channels: CHANNELS,
+                            sample_rate: source_rate,
+                        };
+
+                        if sender.try_send(frame) {
+                            silence_chunks += 1;
+                        }
                     }
 
-                    let samples = ramp_to_zero(
-                        &last_samples,
-                        CHANNELS as usize,
-                        source_block_frames,
-                        transition_frames,
-                    );
-                    let frame = LivePcmFrame {
-                        samples,
-                        channels: CHANNELS,
-                        sample_rate: source_rate,
-                    };
-
-                    if sender.send(frame) {
-                        silence_chunks += 1;
-                        silence_transitions += 1;
-                        in_silence = true;
-                        last_samples.fill(0);
-                    } else {
-                        dropped_chunks += 1;
-                    }
-                } else {
-                    // Once truly silent, keep the AirPlay pipeline clocked at the
-                    // packet cadence. Real PCM will replace silence immediately and
-                    // receives a short fade-in on the transition back.
-                    let frame = LivePcmFrame {
-                        samples: vec![0; source_block_frames * CHANNELS as usize],
-                        channels: CHANNELS,
-                        sample_rate: source_rate,
-                    };
-
-                    if sender.send(frame) {
-                        silence_chunks += 1;
-                    } else {
-                        dropped_chunks += 1;
-                    }
+                    // Never "catch up" synthetic silence in a burst.
+                    next_silence_at = now + silence_chunk_period;
                 }
             }
         }
@@ -465,6 +477,16 @@ mod clickless_tests {
         assert_eq!(samples[0], 0);
         assert!(samples[95 * 2] > 9_000);
         assert_eq!(samples[200 * 2], 10_000);
+    }
+
+    #[test]
+    fn synthetic_silence_period_matches_source_audio_time() {
+        let source_rate = 48_000u32;
+        let source_block_frames = 1024usize;
+        let period = Duration::from_secs_f64(source_block_frames as f64 / source_rate as f64);
+        assert!(period >= Duration::from_millis(21));
+        assert!(period <= Duration::from_millis(22));
+        assert!(MAX_SYNTHETIC_QUEUE_CHUNKS <= 4);
     }
 
     #[test]
