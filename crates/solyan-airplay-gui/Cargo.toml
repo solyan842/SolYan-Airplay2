@@ -6,7 +6,7 @@ license.workspace = true
 build = "build.rs"
 
 [[bin]]
-name = "SolYan-AirPlay2"
+name = "SolYan-AirPlay2-v0.2.4"
 path = "src/main.rs"
 
 [dependencies]

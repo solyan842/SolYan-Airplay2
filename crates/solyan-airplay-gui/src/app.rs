@@ -18,6 +18,7 @@ struct Preferences {
     render_delay_ms: u32,
     experimental_multiroom: bool,
     last_receiver_id: Option<String>,
+    vietnamese: bool,
 }
 
 impl Default for Preferences {
@@ -27,6 +28,7 @@ impl Default for Preferences {
             render_delay_ms: 200,
             experimental_multiroom: false,
             last_receiver_id: None,
+            vietnamese: true,
         }
     }
 }
@@ -77,7 +79,6 @@ pub struct SolYanAirPlayApp {
     progress_rx: Option<Receiver<StreamProgress>>,
     stream_control: Option<StreamControl>,
     progress: Option<StreamProgress>,
-    diagnostics_expanded: bool,
     logo_texture: egui::TextureHandle,
 }
 
@@ -119,11 +120,10 @@ impl SolYanAirPlayApp {
             progress_rx: None,
             stream_control: None,
             progress: None,
-            diagnostics_expanded: false,
             logo_texture,
         };
 
-        app.log("SolYan AirPlay2 v0.2.3 GUI initialized.");
+        app.log("SolYan AirPlay2 v0.2.4 GUI initialized.");
         app.start_scan(cc.egui_ctx.clone());
         app
     }
@@ -135,12 +135,43 @@ impl SolYanAirPlayApp {
         self.logs.push_back(line.into());
     }
 
+    fn tr<'a>(&self, en: &'a str, vi: &'a str) -> &'a str {
+        if self.prefs.vietnamese { vi } else { en }
+    }
+
+    fn export_log(&mut self) {
+        let body = self.logs.iter().cloned().collect::<Vec<_>>().join("\r\n");
+        let base = std::env::var("USERPROFILE")
+            .map(std::path::PathBuf::from)
+            .or_else(|_| std::env::current_dir())
+            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let desktop = base.join("Desktop");
+        let dir = if desktop.is_dir() { desktop } else { base };
+        let path = dir.join("SolYan-AirPlay2-v0.2.4-log.txt");
+        match std::fs::write(&path, body) {
+            Ok(()) => {
+                self.status = if self.prefs.vietnamese {
+                    format!("Đã xuất log: {}", path.display())
+                } else {
+                    format!("Log exported: {}", path.display())
+                };
+            }
+            Err(err) => {
+                self.last_error = Some(if self.prefs.vietnamese {
+                    format!("Không thể xuất log: {err}")
+                } else {
+                    format!("Could not export log: {err}")
+                });
+            }
+        }
+    }
+
     fn start_scan(&mut self, ctx: egui::Context) {
         if self.activity.is_streaming() {
             return;
         }
         self.activity = Activity::Scanning;
-        self.status = "Searching the local network for AirPlay receivers...".into();
+        self.status = self.tr("Scanning for AirPlay devices...", "Đang tìm thiết bị AirPlay...").into();
         self.last_error = None;
         self.log("Scanning mDNS _airplay._tcp.local...");
         worker::spawn_scan(ctx, self.event_tx.clone());
@@ -151,7 +182,7 @@ impl SolYanAirPlayApp {
             return;
         }
         self.activity = Activity::AudioTest;
-        self.status = "Testing Windows WASAPI loopback for 3 seconds...".into();
+        self.status = self.tr("Testing Windows audio...", "Đang kiểm tra âm thanh Windows...").into();
         self.last_error = None;
         self.log("Starting WASAPI loopback probe.");
         worker::spawn_capture_probe(ctx, self.event_tx.clone());
@@ -167,7 +198,7 @@ impl SolYanAirPlayApp {
         };
 
         self.activity = Activity::ConnectionTest;
-        self.status = "Pairing and testing the encrypted AirPlay session...".into();
+        self.status = self.tr("Testing AirPlay connection...", "Đang kiểm tra kết nối AirPlay...").into();
         self.last_error = None;
         self.log("Starting /info → transient pairing → encrypted RTSP SETUP test.");
         worker::spawn_connect_test(ctx, self.event_tx.clone(), selector);
@@ -259,7 +290,7 @@ impl SolYanAirPlayApp {
         if let Some(control) = &self.stream_control {
             control.stop();
             self.activity = Activity::Stopping;
-            self.status = "Stopping stream and closing AirPlay session...".into();
+            self.status = self.tr("Stopping stream...", "Đang dừng phát...").into();
             self.log("Stop requested.");
         }
     }
@@ -496,15 +527,15 @@ impl SolYanAirPlayApp {
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let (text, color) = if self.last_error.is_some() {
-                    ("Attention", theme::RED)
+                    (self.tr("Attention", "Chú ý"), theme::RED)
                 } else if self.activity == Activity::Streaming {
-                    ("Live", theme::GREEN)
+                    (self.tr("Live", "Đang phát"), theme::GREEN)
                 } else if self.activity == Activity::Stopping {
-                    ("Stopping", theme::ACCENT)
+                    (self.tr("Stopping", "Đang dừng"), theme::ACCENT)
                 } else if self.activity.is_busy() {
                     (self.activity.label(), theme::BLUE)
                 } else {
-                    ("Ready", theme::GREEN)
+                    (self.tr("Ready", "Sẵn sàng"), theme::GREEN)
                 };
 
                 egui::Frame::new()
@@ -515,24 +546,33 @@ impl SolYanAirPlayApp {
                     .show(ui, |ui| {
                         ui.label(RichText::new(text).color(color).strong());
                     });
+
+                if ui.small_button(self.tr("Export log", "Xuất log TXT")).clicked() {
+                    self.export_log();
+                }
+
+                let lang = if self.prefs.vietnamese { "VI" } else { "EN" };
+                if ui.small_button(lang).clicked() {
+                    self.prefs.vietnamese = !self.prefs.vietnamese;
+                }
             });
         });
 
-        ui.add_space(8.0);
+        ui.add_space(6.0);
         ui.label(RichText::new(&self.status).color(theme::MUTED));
         if let Some(error) = &self.last_error {
-            ui.add_space(4.0);
+            ui.add_space(3.0);
             ui.label(RichText::new(error).color(theme::RED));
         }
     }
 
     fn draw_sidebar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("AIRPLAY DEVICES").size(12.0).strong().color(theme::MUTED));
+            ui.label(RichText::new(self.tr("AIRPLAY DEVICES", "THIẾT BỊ AIRPLAY")).size(12.0).strong().color(theme::MUTED));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let enabled = !self.activity.is_streaming();
                 if ui
-                    .add_enabled(enabled, egui::Button::new("Scan"))
+                    .add_enabled(enabled, egui::Button::new(self.tr("Scan", "Quét")))
                     .clicked()
                 {
                     self.start_scan(ui.ctx().clone());
@@ -540,6 +580,14 @@ impl SolYanAirPlayApp {
             });
         });
 
+        ui.label(
+            RichText::new(self.tr(
+                "Single devices. Select one, then press Start.",
+                "Thiết bị đơn. Chọn thiết bị rồi nhấn Chạy.",
+            ))
+            .size(10.5)
+            .color(theme::MUTED),
+        );
         ui.add_space(8.0);
 
         let mut clicked_id: Option<String> = None;
@@ -552,9 +600,9 @@ impl SolYanAirPlayApp {
             .show(ui, |ui| {
                 if self.devices.is_empty() {
                     theme::sidebar_card().show(ui, |ui| {
-                        ui.label(RichText::new("No receiver yet").strong().color(theme::TEXT));
+                        ui.label(RichText::new(self.tr("No receiver yet", "Chưa có thiết bị")).strong().color(theme::TEXT));
                         ui.label(
-                            RichText::new("Scan the local network to find HomePod or AirPlay receivers.")
+                            RichText::new(self.tr("Scan to find HomePod and AirPlay devices.", "Nhấn Quét để tìm HomePod và thiết bị AirPlay."))
                                 .size(12.0)
                                 .color(theme::MUTED),
                         );
@@ -668,7 +716,7 @@ impl SolYanAirPlayApp {
             );
         });
         ui.label(
-            RichText::new("Select 2+ speakers. First selected speaker is the group leader.")
+            RichText::new(self.tr("Select 2+ devices. First one is the leader.", "Chọn từ 2 thiết bị. Thiết bị đầu tiên là trưởng nhóm."))
                 .size(11.5)
                 .color(theme::MUTED),
         );
@@ -686,7 +734,7 @@ impl SolYanAirPlayApp {
     fn draw_homepod_pair_section(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(
-                RichText::new("HOMEPOD PAIR")
+                RichText::new(self.tr("HOMEPOD PAIR", "CẶP HOMEPOD"))
                     .size(12.0)
                     .strong()
                     .color(theme::MUTED),
@@ -694,7 +742,7 @@ impl SolYanAirPlayApp {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let enabled = !self.activity.is_streaming();
                 if ui
-                    .add_enabled(enabled, egui::Button::new("Search Pair"))
+                    .add_enabled(enabled, egui::Button::new(self.tr("Search Pair", "Tìm cặp")))
                     .clicked()
                 {
                     self.log("Searching Apple group metadata (tsid / pgid / gid) for HomePod pairs.");
@@ -703,6 +751,14 @@ impl SolYanAirPlayApp {
             });
         });
 
+        ui.label(
+            RichText::new(self.tr(
+                "Stereo HomePod pair from the Home app.",
+                "Cặp HomePod Stereo đã ghép trong ứng dụng Home.",
+            ))
+            .size(10.5)
+            .color(theme::MUTED),
+        );
         ui.add_space(7.0);
         let mut clicked_pair_id: Option<String> = None;
 
@@ -714,15 +770,16 @@ impl SolYanAirPlayApp {
                 .inner_margin(egui::Margin::same(12))
                 .show(ui, |ui| {
                     ui.label(
-                        RichText::new("No HomePod stereo pair detected")
+                        RichText::new(self.tr("No HomePod stereo pair detected", "Chưa tìm thấy cặp HomePod Stereo"))
                             .size(12.0)
                             .strong()
                             .color(theme::TEXT),
                     );
                     ui.label(
-                        RichText::new(
-                            "Search Pair checks Apple tight-sync, parent-group and group metadata. Pair the HomePods first in the Home app.",
-                        )
+                        RichText::new(self.tr(
+                            "Stereo pairs from the Home app. Select a pair to stream in stereo.",
+                            "Cặp HomePod Stereo từ ứng dụng Home. Chọn cặp để phát stereo.",
+                        ))
                         .size(10.0)
                         .color(theme::MUTED),
                     );
@@ -796,14 +853,14 @@ impl SolYanAirPlayApp {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.label(
-                        RichText::new("NOW STREAMING")
+                        RichText::new(self.tr("NOW STREAMING", "ĐANG PHÁT"))
                             .size(11.0)
                             .strong()
                             .color(theme::MUTED),
                     );
                     let names = self.selected_name_list();
                     let title = if names.is_empty() {
-                        "No speaker selected".to_string()
+                        self.tr("No speaker selected", "Chưa chọn thiết bị").to_string()
                     } else {
                         names.join("  +  ")
                     };
@@ -815,7 +872,7 @@ impl SolYanAirPlayApp {
                         let stop = ui.add_sized(
                             [112.0, 42.0],
                             egui::Button::new(
-                                RichText::new("Stop").strong().color(Color32::WHITE),
+                                RichText::new(self.tr("Stop", "Dừng")).strong().color(Color32::WHITE),
                             )
                             .fill(theme::RED.gamma_multiply(0.78)),
                         );
@@ -831,7 +888,7 @@ impl SolYanAirPlayApp {
                         let start = ui.add_enabled(
                             can_start,
                             egui::Button::new(
-                                RichText::new("Start streaming")
+                                RichText::new(self.tr("Start", "Chạy"))
                                     .strong()
                                     .color(Color32::WHITE),
                             )
@@ -889,12 +946,12 @@ impl SolYanAirPlayApp {
 
     fn draw_controls_card(&mut self, ui: &mut egui::Ui) {
         theme::card().show(ui, |ui| {
-            ui.label(RichText::new("Playback").size(17.0).strong().color(theme::TEXT));
+            ui.label(RichText::new(self.tr("Playback", "Điều khiển")).size(17.0).strong().color(theme::TEXT));
             ui.add_space(8.0);
 
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Volume").color(theme::MUTED));
+                ui.label(RichText::new(self.tr("Volume", "Âm lượng")).color(theme::MUTED));
                 ui.add_space(8.0);
 
                 let response = ui.scope(|ui| {
@@ -935,7 +992,7 @@ impl SolYanAirPlayApp {
 
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Latency").color(theme::MUTED));
+                ui.label(RichText::new(self.tr("Latency", "Độ trễ")).color(theme::MUTED));
                 let enabled = !self.activity.is_streaming();
                 ui.add_enabled_ui(enabled, |ui| {
                     ui.add(
@@ -958,7 +1015,7 @@ impl SolYanAirPlayApp {
             ui.horizontal(|ui| {
                 let enabled = self.activity == Activity::Idle;
                 if ui
-                    .add_enabled(enabled, egui::Button::new("Test Windows audio"))
+                    .add_enabled(enabled, egui::Button::new(self.tr("Test Windows audio", "Test âm thanh")))
                     .clicked()
                 {
                     self.start_capture_test(ui.ctx().clone());
@@ -967,7 +1024,7 @@ impl SolYanAirPlayApp {
                 if ui
                     .add_enabled(
                         enabled && !self.selected_ids.is_empty(),
-                        egui::Button::new("Test AirPlay session"),
+                        egui::Button::new(self.tr("Test AirPlay session", "Test AirPlay")),
                     )
                     .clicked()
                 {
@@ -997,9 +1054,7 @@ impl SolYanAirPlayApp {
             ui.add_space(8.0);
             if !self.prefs.experimental_multiroom {
                 ui.label(
-                    RichText::new(
-                        "Disabled by default. Enable Multiroom in the speaker panel when ready to validate PTP synchronization on real HomePods.",
-                    )
+                    RichText::new(self.tr("Enable to stream to multiple devices.", "Bật để phát tới nhiều thiết bị."))
                     .color(theme::MUTED),
                 );
                 return;
@@ -1024,84 +1079,10 @@ impl SolYanAirPlayApp {
 
             ui.add_space(10.0);
             ui.label(
-                RichText::new(
-                    "Engine path is already reserved: connect_group → SETPEERS → shared PTP timing → per-device RTP/retransmit. Keep this off for daily use until hardware validation passes.",
-                )
+                RichText::new(self.tr("PTP synchronized group playback.", "Phát nhóm đồng bộ bằng PTP."))
                 .size(11.5)
                 .color(theme::MUTED),
             );
-        });
-    }
-
-    fn draw_diagnostics_card(&mut self, ui: &mut egui::Ui) {
-        theme::card().show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new("Diagnostics")
-                        .size(17.0)
-                        .strong()
-                        .color(theme::TEXT),
-                );
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.small_button("Clear log").clicked() {
-                        self.logs.clear();
-                    }
-                });
-            });
-
-            if let Some(progress) = &self.progress {
-                ui.add_space(10.0);
-                ui.columns(4, |columns| {
-                    metric(
-                        &mut columns[0],
-                        "Packets",
-                        &progress.packets_sent.to_string(),
-                        "RTP audio packets",
-                    );
-                    metric(
-                        &mut columns[1],
-                        "Retransmit",
-                        &progress.retransmit_requested.to_string(),
-                        &format!("fulfilled {}", progress.retransmit_fulfilled),
-                    );
-                    metric(
-                        &mut columns[2],
-                        "Underruns",
-                        &progress.underruns.to_string(),
-                        &format!("loss {:.3}%", progress.loss_percent),
-                    );
-                    metric(
-                        &mut columns[3],
-                        "Captured",
-                        &progress.captured_chunks.to_string(),
-                        &format!(
-                            "silence {} • late {} • transitions {} • dropped {}",
-                            progress.silence_chunks,
-                            progress.late_polls,
-                            progress.silence_transitions,
-                            progress.dropped_chunks
-                        ),
-                    );
-                });
-            }
-
-            ui.add_space(10.0);
-            let log_height = (ui.available_height() - 8.0).max(150.0);
-            egui::ScrollArea::vertical()
-                .id_salt("diagnostic-log")
-                .max_height(log_height)
-                .auto_shrink([false, false])
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    for line in &self.logs {
-                        ui.label(
-                            RichText::new(line)
-                                .monospace()
-                                .size(11.0)
-                                .color(theme::MUTED),
-                        );
-                    }
-                });
         });
     }
 
@@ -1120,13 +1101,13 @@ impl SolYanAirPlayApp {
                             .color(theme::ACCENT),
                     );
                     ui.label(
-                        RichText::new("· SolYan AirPlay2 v0.2.3")
+                        RichText::new("· SolYan AirPlay2 v0.2.4")
                             .size(11.5)
                             .strong()
                             .color(theme::TEXT),
                     );
                     ui.label(
-                        RichText::new("· Tác giả / Developer: SolYan ·")
+                        RichText::new(self.tr("· Developer: SolYan ·", "· Tác giả: SolYan ·"))
                             .size(11.5)
                             .strong()
                             .color(theme::TEXT),
@@ -1217,108 +1198,20 @@ impl eframe::App for SolYanAirPlayApp {
                         ui.add_space(10.0);
                         self.draw_multiroom_card(ui);
                         ui.add_space(10.0);
-
-                        // Diagnostics is a developer tool, not part of the primary
-                        // playback surface. Keep it collapsed unless explicitly opened.
                         egui::Frame::new()
-                            .fill(theme::SIDEBAR)
-                            .stroke(Stroke::new(1.0, theme::BORDER))
+                            .fill(theme::ACCENT_SOFT.gamma_multiply(0.45))
+                            .stroke(Stroke::new(1.0, theme::ACCENT.gamma_multiply(0.35)))
                             .corner_radius(egui::CornerRadius::same(10))
                             .inner_margin(egui::Margin::symmetric(12, 8))
                             .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    let arrow = if self.diagnostics_expanded { "▴" } else { "▾" };
-                                    if ui
-                                        .button(
-                                            RichText::new(format!("Diagnostics  {arrow}"))
-                                                .strong()
-                                                .color(theme::TEXT),
-                                        )
-                                        .clicked()
-                                    {
-                                        self.diagnostics_expanded = !self.diagnostics_expanded;
-                                    }
-
-                                    if !self.diagnostics_expanded {
-                                        if let Some(progress) = &self.progress {
-                                            ui.label(
-                                                RichText::new(format!(
-                                                    "Loss {:.3}%  ·  Retransmit {}  ·  Underruns {}",
-                                                    progress.loss_percent,
-                                                    progress.retransmit_requested,
-                                                    progress.underruns
-                                                ))
-                                                .size(10.5)
-                                                .color(theme::MUTED),
-                                            );
-                                        }
-                                    }
-
-                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        if self.diagnostics_expanded
-                                            && ui.small_button("Clear log").clicked()
-                                        {
-                                            self.logs.clear();
-                                        }
-                                    });
-                                });
-
-                                if self.diagnostics_expanded {
-                                    ui.add_space(10.0);
-
-                                    if let Some(progress) = &self.progress {
-                                        ui.columns(4, |columns| {
-                                            metric(
-                                                &mut columns[0],
-                                                "Packets",
-                                                &progress.packets_sent.to_string(),
-                                                "RTP audio packets",
-                                            );
-                                            metric(
-                                                &mut columns[1],
-                                                "Retransmit",
-                                                &progress.retransmit_requested.to_string(),
-                                                &format!("fulfilled {}", progress.retransmit_fulfilled),
-                                            );
-                                            metric(
-                                                &mut columns[2],
-                                                "Underruns",
-                                                &progress.underruns.to_string(),
-                                                &format!("loss {:.3}%", progress.loss_percent),
-                                            );
-                                            metric(
-                                                &mut columns[3],
-                                                "Captured",
-                                                &progress.captured_chunks.to_string(),
-                                                &format!(
-                                                    "silence {} · late {} · transitions {} · dropped {}",
-                                                    progress.silence_chunks,
-                                                    progress.late_polls,
-                                                    progress.silence_transitions,
-                                                    progress.dropped_chunks
-                                                ),
-                                            );
-                                        });
-                                        ui.add_space(8.0);
-                                    }
-
-                                    let log_height = ui.available_height().clamp(90.0, 260.0);
-                                    egui::ScrollArea::vertical()
-                                        .id_salt("diagnostic-log-collapsible")
-                                        .max_height(log_height)
-                                        .auto_shrink([false, false])
-                                        .stick_to_bottom(true)
-                                        .show(ui, |ui| {
-                                            for line in &self.logs {
-                                                ui.label(
-                                                    RichText::new(line)
-                                                        .monospace()
-                                                        .size(11.0)
-                                                        .color(theme::MUTED),
-                                                );
-                                            }
-                                        });
-                                }
+                                ui.label(
+                                    RichText::new(self.tr(
+                                        "AirPlay may introduce latency or A/V sync offset due to protocol buffering and synchronization.",
+                                        "AirPlay có thể xảy ra trễ hoặc lệch tiếng/hình do cơ chế đệm và đồng bộ của giao thức.",
+                                    ))
+                                    .size(10.5)
+                                    .color(theme::MUTED),
+                                );
                             });
                     },
                 );
