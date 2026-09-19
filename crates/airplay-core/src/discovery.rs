@@ -1,9 +1,12 @@
 use airplay2_discovery::{Discovery, ServiceBrowser};
 use anyhow::Result;
+use crate::device_profile::DeviceKind;
+use std::net::IpAddr;
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct AirPlayReceiver {
+    pub id: String,
     pub name: String,
     pub model: String,
     pub port: u16,
@@ -25,6 +28,7 @@ pub async fn discover_once(timeout: Duration) -> Result<Vec<AirPlayReceiver>> {
     Ok(devices
         .into_iter()
         .map(|d| {
+            let id = d.id.to_mac_string();
             let supports_airplay2 = d.supports_airplay2();
             let supports_ptp = d.supports_ptp();
             let supports_audio = d.features.supports_audio();
@@ -38,6 +42,7 @@ pub async fn discover_once(timeout: Duration) -> Result<Vec<AirPlayReceiver>> {
             let addresses = d.addresses.iter().map(ToString::to_string).collect();
 
             AirPlayReceiver {
+                id,
                 name: d.name,
                 model: d.model,
                 port: d.port,
@@ -53,4 +58,23 @@ pub async fn discover_once(timeout: Duration) -> Result<Vec<AirPlayReceiver>> {
             }
         })
         .collect())
+}
+
+
+impl AirPlayReceiver {
+    pub fn device_kind(&self) -> DeviceKind {
+        DeviceKind::from_model(&self.model)
+    }
+
+    pub fn friendly_model_name(&self) -> &'static str {
+        self.device_kind().friendly_name()
+    }
+
+    pub fn preferred_address(&self) -> Option<&str> {
+        self.addresses
+            .iter()
+            .find(|value| value.parse::<IpAddr>().map(|ip| ip.is_ipv4()).unwrap_or(false))
+            .or_else(|| self.addresses.first())
+            .map(String::as_str)
+    }
 }
