@@ -122,7 +122,7 @@ impl SolYanAirPlayApp {
             logo_texture,
         };
 
-        app.log("SolYan AirPlay2 v0.1.6 GUI initialized.");
+        app.log("SolYan AirPlay2 v0.1.7 GUI initialized.");
         app.start_scan(cc.egui_ctx.clone());
         app
     }
@@ -728,15 +728,37 @@ impl SolYanAirPlayApp {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Volume").color(theme::MUTED));
-                let response = ui.add(
-                    egui::Slider::new(&mut self.prefs.volume, 0.0..=1.0)
-                        .show_value(false),
-                );
-                ui.label(
-                    RichText::new(format!("{:.0}%", self.prefs.volume * 100.0))
-                        .strong()
-                        .color(theme::TEXT),
-                );
+                ui.add_space(8.0);
+
+                let response = ui.scope(|ui| {
+                    let visuals = ui.visuals_mut();
+                    visuals.slider_trailing_fill = true;
+                    visuals.selection.bg_fill = theme::ACCENT;
+                    visuals.widgets.inactive.bg_fill = Color32::from_rgb(48, 49, 55);
+                    visuals.widgets.hovered.bg_fill = Color32::from_rgb(58, 59, 66);
+                    visuals.widgets.active.bg_fill = theme::ACCENT_SOFT;
+                    ui.spacing_mut().slider_width = 360.0;
+                    ui.add(
+                        egui::Slider::new(&mut self.prefs.volume, 0.0..=1.0)
+                            .show_value(false),
+                    )
+                }).inner;
+
+                ui.add_space(8.0);
+                egui::Frame::new()
+                    .fill(theme::ACCENT_SOFT)
+                    .stroke(Stroke::new(1.0, theme::ACCENT))
+                    .corner_radius(egui::CornerRadius::same(8))
+                    .inner_margin(egui::Margin::symmetric(12, 6))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(format!("{:.0}%", self.prefs.volume * 100.0))
+                                .size(14.0)
+                                .strong()
+                                .color(theme::ACCENT),
+                        );
+                    });
+
                 if response.changed() {
                     if let Some(control) = &self.stream_control {
                         control.set_volume(self.prefs.volume);
@@ -921,7 +943,7 @@ impl SolYanAirPlayApp {
         ui.add_space(5.0);
         ui.horizontal(|ui| {
             ui.label(
-                RichText::new("© 2026 SolYan · SolYan AirPlay2 v0.1.6 · Designed & developed by SolYan")
+                RichText::new("© 2026 SolYan · SolYan AirPlay2 v0.1.7 · Designed & developed by SolYan")
                     .size(10.5)
                     .color(theme::MUTED),
             );
