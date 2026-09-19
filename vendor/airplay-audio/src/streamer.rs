@@ -30,7 +30,7 @@ pub enum StreamerState {
     Error,
 }
 
-/// Try to set real-time priority for the current thread (Linux only).
+/// Try to set real-time priority for the current audio sender thread.
 #[cfg(target_os = "linux")]
 fn set_realtime_priority() {
     use std::mem;
@@ -54,7 +54,40 @@ fn set_realtime_priority() {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+fn set_realtime_priority() {
+    use windows_sys::Win32::System::Threading::{
+        AvSetMmThreadCharacteristicsW, AvSetMmThreadPriority, GetCurrentThread,
+        SetThreadPriority, AVRT_PRIORITY_HIGH, THREAD_PRIORITY_HIGHEST,
+    };
+
+    let task_name: Vec<u16> = "Pro Audio\0".encode_utf16().collect();
+    let mut task_index: u32 = 0;
+
+    unsafe {
+        let handle = AvSetMmThreadCharacteristicsW(task_name.as_ptr(), &mut task_index);
+        if !handle.is_null() {
+            let _ = AvSetMmThreadPriority(handle, AVRT_PRIORITY_HIGH);
+            tracing::info!(
+                "RTP sender registered with Windows MMCSS 'Pro Audio' (task index {})",
+                task_index
+            );
+            return;
+        }
+
+        let ok = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+        if ok != 0 {
+            tracing::info!("RTP sender priority set to THREAD_PRIORITY_HIGHEST");
+        } else {
+            tracing::warn!(
+                "Failed to elevate Windows RTP sender thread priority: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn set_realtime_priority() {
     tracing::debug!("RT priority not supported on this platform");
 }
@@ -718,14 +751,14 @@ impl AudioStreamer {
         }
         self.state_cache.store(StreamerState::Buffering as u8, Ordering::Relaxed);
 
-        // For live streaming, wait for initial buffer fill before streaming.
-        // This prevents startup artifacts from sending packets before we have
-        // enough audio data buffered. Target ~500ms of buffer (about 60 packets
-        // at 352 frames/packet, 44.1kHz).
-        tracing::info!("Live streaming: waiting for initial buffer fill...");
+        // For live Windows capture, ~400ms of decoded PCM is enough to absorb
+        // scheduler/WASAPI burst jitter without adding a full second of latency.
+        // The previous 50% target meant ~1000ms on the 2000ms ring and could
+        // timeout before the capture producer resumed, causing underruns/pops.
+        tracing::info!("Live streaming: waiting for stable initial buffer fill...");
         let buffer_start = std::time::Instant::now();
-        let max_wait = std::time::Duration::from_secs(5);
-        let target_fill_pct = 50.0; // Wait for 50% of 2000ms buffer = 1000ms
+        let max_wait = std::time::Duration::from_secs(3);
+        let target_fill_pct = 20.0; // ~400ms of the 2000ms buffer
 
         loop {
             // Try to decode some frames into the buffer
