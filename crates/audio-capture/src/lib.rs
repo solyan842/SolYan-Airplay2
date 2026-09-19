@@ -282,12 +282,15 @@ pub fn start_default_loopback(_requested: AudioFormat) -> Result<CaptureHandle> 
                 let output_samples_per_block = OUTPUT_BLOCK_FRAMES * 2;
 
                 while thread_running.load(Ordering::SeqCst) {
-                    if event.wait_for_event(EVENT_POLL_MS).is_err() {
-                        continue;
-                    }
+                    // Do not make PCM capture depend exclusively on the event signal.
+                    // On a cold first launch Windows can occasionally miss/delay the
+                    // initial loopback event even though packets are already pending.
+                    // We still wait to avoid busy-spinning, but always inspect the
+                    // capture buffer afterwards and drain anything available.
+                    let _ = event.wait_for_event(EVENT_POLL_MS);
 
-                    // Drain every packet pending for this event. Reading only one
-                    // packet can build a hidden backlog and eventually cause a glitch.
+                    // Drain every packet currently pending. This also recovers from
+                    // a missed/late first event without requiring an app restart.
                     loop {
                         let pending = capture
                             .get_next_packet_size()
