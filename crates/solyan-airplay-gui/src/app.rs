@@ -731,16 +731,16 @@ impl SolYanAirPlayApp {
                 let enabled = !self.activity.is_streaming();
                 ui.add_enabled_ui(enabled, |ui| {
                     ui.add(
-                        egui::Slider::new(&mut self.prefs.render_delay_ms, 0..=600)
+                        egui::Slider::new(&mut self.prefs.render_delay_ms, 200..=800)
                             .suffix(" ms"),
                     );
-                    if ui.small_button("Low 200").clicked() {
-                        self.prefs.render_delay_ms = 200;
+                    if ui.small_button("Safer 500").clicked() {
+                        self.prefs.render_delay_ms = 750;
                     }
                     if ui.small_button("Stable 350").clicked() {
                         self.prefs.render_delay_ms = 350;
                     }
-                    if ui.small_button("Safe 500").clicked() {
+                    if ui.small_button("Max 750").clicked() {
                         self.prefs.render_delay_ms = 500;
                     }
                 });
