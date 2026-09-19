@@ -6,15 +6,28 @@ mod worker;
 
 use app::SolYanAirPlayApp;
 use eframe::egui;
+use std::sync::Arc;
 
 fn main() -> eframe::Result {
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!(
+        "../assets/solyan-airplay-logo.png"
+    ))
+    .ok()
+    .map(Arc::new);
+
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("SolYan AirPlay2")
+        .with_app_id("com.solyan.airplay2")
+        .with_inner_size([1280.0, 820.0])
+        .with_min_inner_size([1040.0, 700.0]);
+
+    if let Some(icon) = icon {
+        viewport = viewport.with_icon(icon);
+    }
+
     let native_options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
-        viewport: egui::ViewportBuilder::default()
-            .with_title("SolYan AirPlay2")
-            .with_app_id("com.solyan.airplay2")
-            .with_inner_size([1180.0, 760.0])
-            .with_min_inner_size([980.0, 660.0]),
+        viewport,
         ..Default::default()
     };
 
