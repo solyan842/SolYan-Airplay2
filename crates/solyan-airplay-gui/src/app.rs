@@ -123,7 +123,7 @@ impl SolYanAirPlayApp {
             logo_texture,
         };
 
-        app.log("SolYan AirPlay2 v0.2.2 GUI initialized.");
+        app.log("SolYan AirPlay2 v0.2.3 GUI initialized.");
         app.start_scan(cc.egui_ctx.clone());
         app
     }
@@ -1120,7 +1120,7 @@ impl SolYanAirPlayApp {
                             .color(theme::ACCENT),
                     );
                     ui.label(
-                        RichText::new("· SolYan AirPlay2 v0.2.2")
+                        RichText::new("· SolYan AirPlay2 v0.2.3")
                             .size(11.5)
                             .strong()
                             .color(theme::TEXT),
