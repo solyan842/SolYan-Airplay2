@@ -85,6 +85,7 @@ pub struct SolYanAirPlayApp {
     progress: Option<StreamProgress>,
     logo_light_texture: egui::TextureHandle,
     logo_dark_texture: egui::TextureHandle,
+    startup_window_forced: bool,
 }
 
 impl SolYanAirPlayApp {
@@ -147,9 +148,10 @@ impl SolYanAirPlayApp {
             progress: None,
             logo_light_texture,
             logo_dark_texture,
+            startup_window_forced: false,
         };
 
-        app.log("SolYan AirPlay2 v0.2.12 GUI initialized.");
+        app.log("SolYan AirPlay2 v0.2.13 GUI initialized.");
         app.start_scan(cc.egui_ctx.clone());
         app
     }
@@ -173,7 +175,7 @@ impl SolYanAirPlayApp {
             .unwrap_or_else(|_| std::path::PathBuf::from("."));
         let desktop = base.join("Desktop");
         let dir = if desktop.is_dir() { desktop } else { base };
-        let path = dir.join("SolYan-AirPlay2-v0.2.12-log.txt");
+        let path = dir.join("SolYan-AirPlay2-v0.2.13-log.txt");
         match std::fs::write(&path, body) {
             Ok(()) => {
                 self.status = if self.prefs.vietnamese {
@@ -1305,7 +1307,7 @@ impl SolYanAirPlayApp {
                             .color(theme::ACCENT),
                     );
                     ui.label(
-                        RichText::new("· SolYan AirPlay2 v0.2.12")
+                        RichText::new("· SolYan AirPlay2 v0.2.13")
                             .size(11.5)
                             .strong()
                             .color(theme::text()),
@@ -1330,6 +1332,11 @@ impl SolYanAirPlayApp {
 
 impl eframe::App for SolYanAirPlayApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.startup_window_forced {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+            self.startup_window_forced = true;
+        }
+
         while let Ok(event) = self.event_rx.try_recv() {
             self.handle_event(event);
         }
