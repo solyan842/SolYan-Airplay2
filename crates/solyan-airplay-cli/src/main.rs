@@ -13,7 +13,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    println!("SolYan AirPlay2 v0.1.4");
+    println!("SolYan AirPlay2 v0.1.5");
 
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
