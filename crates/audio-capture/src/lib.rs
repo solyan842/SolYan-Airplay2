@@ -170,7 +170,7 @@ fn convert_native_to_stereo_i16(
 
 #[cfg(windows)]
 pub fn start_default_loopback(_requested: AudioFormat) -> Result<CaptureHandle> {
-    use wasapi::{get_default_device, initialize_mta, Direction, SampleType, StreamMode};
+    use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode, initialize_mta};
 
     const EVENT_POLL_MS: u32 = 250;
     const OUTPUT_BLOCK_FRAMES: usize = 1024;
@@ -192,7 +192,10 @@ pub fn start_default_loopback(_requested: AudioFormat) -> Result<CaptureHandle> 
                     .map_err(|e| format!("initialize_mta: {e}"))?;
                 set_capture_thread_priority();
 
-                let device = get_default_device(&Direction::Render)
+                let enumerator = DeviceEnumerator::new()
+                    .map_err(|e| format!("DeviceEnumerator::new: {e}"))?;
+                let device = enumerator
+                    .get_default_device(&Direction::Render)
                     .map_err(|e| format!("get_default_device: {e}"))?;
                 let device_name = device
                     .get_friendlyname()
