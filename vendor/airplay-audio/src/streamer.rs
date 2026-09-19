@@ -479,7 +479,7 @@ impl AudioStreamer {
             inner: Arc::new(Mutex::new(StreamerInner {
                 state: StreamerState::Idle,
                 config,
-                buffer: AudioBuffer::new(audio_format, 2000),
+                buffer: AudioBuffer::new(audio_format, 3000),
                 rtp_senders: Vec::new(),
                 current_timestamp: 0,
                 last_sync_rtp: 0,
@@ -660,7 +660,7 @@ impl AudioStreamer {
 
         if self.task.is_none() {
             // Set up the dedicated sender thread with cloned sockets
-            let (tx, rx) = bounded::<SenderMessage>(8);
+            let (tx, rx) = bounded::<SenderMessage>(32);
             let frame_duration = std::time::Duration::from_nanos(frame_duration_ns);
 
             {
@@ -758,7 +758,7 @@ impl AudioStreamer {
         tracing::info!("Live streaming: waiting for stable initial buffer fill...");
         let buffer_start = std::time::Instant::now();
         let max_wait = std::time::Duration::from_secs(3);
-        let target_fill_pct = 20.0; // ~400ms of the 2000ms buffer
+        let target_fill_pct = 50.0; // ~1500ms of the 3000ms buffer: prioritize clean playback
 
         loop {
             // Try to decode some frames into the buffer
@@ -801,7 +801,7 @@ impl AudioStreamer {
 
         if self.task.is_none() {
             // Set up the dedicated sender thread with cloned sockets
-            let (tx, rx) = bounded::<SenderMessage>(8);
+            let (tx, rx) = bounded::<SenderMessage>(32);
             let frame_duration = std::time::Duration::from_nanos(frame_duration_ns);
 
             {
@@ -1002,7 +1002,7 @@ fn decode_some_inner(inner: &mut StreamerInner) -> Result<()> {
     // Decode 3 frames per batch to minimize blocking in send loop.
     // Very small batches ensure minimal interference with precise timing.
     // With 2ms timeout per frame, worst case is ~6ms blocking.
-    for _ in 0..3 {
+    for _ in 0..8 {
         // Try live decoder first (for Bluetooth/external sources), then file decoder
         let frame = if let Some(ref mut live_decoder) = inner.live_decoder {
             live_decoder.decode_resampled(&format, frames_per_packet)?
@@ -1083,7 +1083,7 @@ async fn run_streamer(
             // Keep buffer above 40% but don't decode too aggressively
             // to avoid blocking the send loop with decode operations.
             // With 50% initial fill, we have plenty of headroom.
-            if guard.buffer.fill_percentage() < 40.0 {
+            if guard.buffer.fill_percentage() < 75.0 {
                 let decode_start = Instant::now();
                 decode_some_inner(&mut guard)?;
                 let decode_elapsed = decode_start.elapsed();
@@ -1097,7 +1097,7 @@ async fn run_streamer(
 
             // Check for recovery from Buffering state
             if guard.state == StreamerState::Buffering {
-                if guard.buffer.fill_percentage() > 10.0 {
+                if guard.buffer.fill_percentage() > 40.0 {
                     guard.state = StreamerState::Streaming;
                     state_cache.store(StreamerState::Streaming as u8, Ordering::Relaxed);
                 } else {
