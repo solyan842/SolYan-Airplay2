@@ -6,7 +6,7 @@ use solyan_airplay_core::device_profile::DeviceKind;
 use solyan_airplay_core::discovery::{detect_homepod_pairs, AirPlayReceiver, HomePodPair};
 use solyan_airplay_core::live::{LiveStreamMode, StreamControl, StreamProgress};
 use std::collections::VecDeque;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use worker::GuiEvent;
 
 const PREFS_KEY: &str = "solyan-airplay2-prefs";
@@ -83,6 +83,8 @@ pub struct SolYanAirPlayApp {
     progress: Option<StreamProgress>,
     logo_light_texture: egui::TextureHandle,
     logo_dark_texture: egui::TextureHandle,
+    startup_scan_at: Option<Instant>,
+    startup_scan_retries: u8,
 }
 
 impl SolYanAirPlayApp {
@@ -145,10 +147,16 @@ impl SolYanAirPlayApp {
             progress: None,
             logo_light_texture,
             logo_dark_texture,
+            startup_scan_at: Some(Instant::now() + Duration::from_millis(800)),
+            startup_scan_retries: 0,
         };
 
-        app.log("SolYan AirPlay2 v0.2.9 GUI initialized.");
-        app.start_scan(cc.egui_ctx.clone());
+        app.log("SolYan AirPlay2 v0.2.10 GUI initialized.");
+        app.status = app.tr(
+            "Starting interface… AirPlay scan will begin shortly.",
+            "Đang khởi tạo giao diện… sẽ quét AirPlay sau giây lát.",
+        ).into();
+        cc.egui_ctx.request_repaint_after(Duration::from_millis(850));
         app
     }
 
@@ -198,7 +206,12 @@ impl SolYanAirPlayApp {
         self.status = self.tr("Scanning for AirPlay devices...", "Đang tìm thiết bị AirPlay...").into();
         self.last_error = None;
         self.log("Scanning mDNS _airplay._tcp.local...");
-        worker::spawn_scan(ctx, self.event_tx.clone());
+        if let Err(error) = worker::spawn_scan(ctx, self.event_tx.clone()) {
+            self.activity = Activity::Idle;
+            self.last_error = Some(error.clone());
+            self.status = self.tr("Could not start AirPlay scan.", "Không thể bắt đầu quét AirPlay.").into();
+            self.log(format!("Scan thread error: {error}"));
+        }
     }
 
     fn start_capture_test(&mut self, ctx: egui::Context) {
@@ -431,8 +444,24 @@ impl SolYanAirPlayApp {
                             self.selected_ids.truncate(1);
                         }
 
+                        if self.devices.is_empty() && self.startup_scan_retries < 1 {
+                            self.startup_scan_retries += 1;
+                            self.startup_scan_at = Some(Instant::now() + Duration::from_millis(1200));
+                            self.log("Startup discovery returned no receivers; scheduling one automatic retry.");
+                        }
+
                         self.status = if self.devices.is_empty() {
-                            "No AirPlay receiver found on this network.".into()
+                            if self.startup_scan_retries > 0 {
+                                self.tr(
+                                    "No AirPlay receiver found yet — retrying automatically…",
+                                    "Chưa tìm thấy thiết bị AirPlay — đang tự quét lại…",
+                                ).into()
+                            } else {
+                                self.tr(
+                                    "No AirPlay receiver found on this network.",
+                                    "Không tìm thấy thiết bị AirPlay trong mạng này.",
+                                ).into()
+                            }
                         } else {
                             let homepods = self
                                 .devices
@@ -455,8 +484,13 @@ impl SolYanAirPlayApp {
                     }
                     Err(error) => {
                         self.last_error = Some(error.clone());
-                        self.status = "Discovery failed.".into();
+                        self.status = self.tr("Discovery failed.", "Quét AirPlay thất bại.").into();
                         self.log(format!("Discovery error: {error}"));
+                        if self.startup_scan_retries < 1 {
+                            self.startup_scan_retries += 1;
+                            self.startup_scan_at = Some(Instant::now() + Duration::from_millis(1200));
+                            self.log("Startup discovery failed; scheduling one automatic retry.");
+                        }
                     }
                 }
             }
@@ -1302,6 +1336,17 @@ impl SolYanAirPlayApp {
 
 impl eframe::App for SolYanAirPlayApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.activity == Activity::Idle {
+            if let Some(at) = self.startup_scan_at {
+                if Instant::now() >= at {
+                    self.startup_scan_at = None;
+                    self.start_scan(ctx.clone());
+                } else {
+                    ctx.request_repaint_after(at.saturating_duration_since(Instant::now()));
+                }
+            }
+        }
+
         while let Ok(event) = self.event_rx.try_recv() {
             self.handle_event(event);
         }
