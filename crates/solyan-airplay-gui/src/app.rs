@@ -122,7 +122,7 @@ impl SolYanAirPlayApp {
             logo_texture,
         };
 
-        app.log("SolYan AirPlay2 v0.1.7 GUI initialized.");
+        app.log("SolYan AirPlay2 v0.1.8 GUI initialized.");
         app.start_scan(cc.egui_ctx.clone());
         app
     }
@@ -901,7 +901,11 @@ impl SolYanAirPlayApp {
                         &mut columns[2],
                         "Underruns",
                         &progress.underruns.to_string(),
-                        &format!("loss {:.3}%", progress.loss_percent),
+                        &format!(
+                            "loss {:.3}% • drift {:+.1} ppm",
+                            progress.loss_percent,
+                            progress.drift_ppm
+                        ),
                     );
                     metric(
                         &mut columns[3],
@@ -943,7 +947,7 @@ impl SolYanAirPlayApp {
         ui.add_space(5.0);
         ui.horizontal(|ui| {
             ui.label(
-                RichText::new("© 2026 SolYan · SolYan AirPlay2 v0.1.7 · Designed & developed by SolYan")
+                RichText::new("© 2026 SolYan · SolYan AirPlay2 v0.1.8 · Designed & developed by SolYan")
                     .size(10.5)
                     .color(theme::MUTED),
             );
