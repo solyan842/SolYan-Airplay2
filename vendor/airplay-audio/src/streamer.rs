@@ -411,6 +411,10 @@ struct StreamerInner {
     rtp_senders: Vec<RtpSender>,
     current_timestamp: u64,
     last_sync_rtp: u32,
+    /// Stable RTP->wall-clock timeline anchor for NTP sync packets.
+    /// Periodic sync must advance from RTP sample time, not from scheduler "now".
+    sync_anchor_timestamp: Option<u64>,
+    sync_anchor_wall_ns: Option<u64>,
     clock: Clock,
     clock_offset: Option<ClockOffset>,
     timing_rx: Option<watch::Receiver<ClockOffset>>,
@@ -483,6 +487,8 @@ impl AudioStreamer {
                 rtp_senders: Vec::new(),
                 current_timestamp: 0,
                 last_sync_rtp: 0,
+                sync_anchor_timestamp: None,
+                sync_anchor_wall_ns: None,
                 clock: Clock::new(audio_format.sample_rate.as_hz()),
                 clock_offset: None,
                 timing_rx: None,
@@ -899,6 +905,9 @@ impl AudioStreamer {
     pub async fn reset_after_flush(&mut self) {
         let mut inner = self.inner.lock().await;
         inner.first_packet_sent = false;
+        inner.last_sync_rtp = 0;
+        inner.sync_anchor_timestamp = None;
+        inner.sync_anchor_wall_ns = None;
         for sender in &mut inner.rtp_senders {
             sender.reset_sync_state();
         }
@@ -1263,8 +1272,28 @@ async fn run_streamer(
                     local_wall
                 };
 
-                // Apply render delay
-                let render_adjusted = adjusted + guard.render_delay_ns;
+                // Build one stable RTP -> NTP timeline. The previous code
+                // remapped each periodic sync packet to scheduler "now", so any
+                // change in decoder/buffer depth could move the receiver timeline
+                // by a few milliseconds and produce an audible tick.
+                if guard.sync_anchor_timestamp.is_none() {
+                    guard.sync_anchor_timestamp = Some(packet_timestamp);
+                    guard.sync_anchor_wall_ns = Some(adjusted + guard.render_delay_ns);
+                    tracing::info!(
+                        "NTP sync timeline anchored: rtp={} wall_ns={}",
+                        packet_timestamp,
+                        adjusted + guard.render_delay_ns
+                    );
+                }
+
+                let anchor_ts = guard.sync_anchor_timestamp.unwrap_or(packet_timestamp);
+                let anchor_wall = guard
+                    .sync_anchor_wall_ns
+                    .unwrap_or(adjusted + guard.render_delay_ns);
+                let delta_samples = packet_timestamp.saturating_sub(anchor_ts);
+                let delta_ns = ((delta_samples as u128 * 1_000_000_000u128)
+                    / sample_rate as u128) as u64;
+                let render_adjusted = anchor_wall.saturating_add(delta_ns);
                 let ntp = unix_to_ntp(render_adjusted);
 
                 // Set marker bit on first audio packet
