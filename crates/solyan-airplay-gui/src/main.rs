@@ -5,23 +5,21 @@ mod theme;
 mod worker;
 
 use app::SolYanAirPlayApp;
+use base64::Engine as _;
 use eframe::egui;
 
-const APP_ICON_PNG: &[u8] = include_bytes!("../../../assets/solyan-airplay-logo-64.png");
-
 fn load_app_icon() -> egui::IconData {
-    match image::load_from_memory(APP_ICON_PNG) {
-        Ok(image) => {
-            let rgba = image.to_rgba8();
-            let (width, height) = rgba.dimensions();
-            egui::IconData {
-                rgba: rgba.into_raw(),
-                width,
-                height,
-            }
-        }
-        Err(_) => egui::IconData::default(),
-    }
+    let logo_png = base64::engine::general_purpose::STANDARD
+        .decode(concat!(
+            include_str!("../assets/solyan-airplay-logo.0.b64"),
+            include_str!("../assets/solyan-airplay-logo.1.b64"),
+            include_str!("../assets/solyan-airplay-logo.2.b64"),
+            include_str!("../assets/solyan-airplay-logo.3.b64")
+        ))
+        .expect("embedded SolYan AirPlay logo must decode");
+
+    eframe::icon_data::from_png_bytes(&logo_png)
+        .expect("embedded SolYan AirPlay logo must be a valid PNG")
 }
 
 fn main() -> eframe::Result {
