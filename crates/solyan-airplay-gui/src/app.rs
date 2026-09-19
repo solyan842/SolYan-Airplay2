@@ -12,9 +12,11 @@ use worker::GuiEvent;
 const PREFS_KEY: &str = "solyan-airplay2-prefs";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 struct Preferences {
     volume: f32,
     render_delay_ms: u32,
+    video_low_latency: bool,
     experimental_multiroom: bool,
     last_receiver_id: Option<String>,
 }
@@ -24,6 +26,7 @@ impl Default for Preferences {
         Self {
             volume: 0.80,
             render_delay_ms: 200,
+            video_low_latency: false,
             experimental_multiroom: false,
             last_receiver_id: None,
         }
@@ -101,7 +104,7 @@ impl SolYanAirPlayApp {
             progress: None,
         };
 
-        app.log("SolYan AirPlay2 v0.1.5 GUI initialized.");
+        app.log("SolYan AirPlay2 v0.1.6 GUI initialized.");
         app.start_scan(cc.egui_ctx.clone());
         app
     }
@@ -188,11 +191,18 @@ impl SolYanAirPlayApp {
             "Connecting and starting realtime ALAC stream...".into()
         };
 
+        let effective_render_delay_ms = if self.prefs.video_low_latency {
+            0
+        } else {
+            self.prefs.render_delay_ms
+        };
+
         self.log(match mode {
             LiveStreamMode::Single => {
                 format!(
-                    "Starting single-speaker stream (render lead {} ms).",
-                    self.prefs.render_delay_ms
+                    "Starting single-speaker stream (profile={}, render lead {} ms).",
+                    if self.prefs.video_low_latency { "Video" } else { "Music" },
+                    effective_render_delay_ms
                 )
             }
             LiveStreamMode::MultiroomExperimental => format!(
@@ -207,7 +217,7 @@ impl SolYanAirPlayApp {
             self.selected_ids.clone(),
             mode,
             control,
-            self.prefs.render_delay_ms,
+            effective_render_delay_ms,
         );
     }
 
@@ -355,10 +365,12 @@ impl SolYanAirPlayApp {
                             info.elapsed.as_secs_f64()
                         );
                         self.log(format!(
-                            "Stream closed: targets={}, captured={}, silence={}, dropped={}.",
+                            "Stream closed: targets={}, captured={}, silence={}, late={}, transitions={}, dropped={}.",
                             info.target_names.join(", "),
                             info.captured_chunks,
                             info.silence_chunks,
+                            info.late_polls,
+                            info.silence_transitions,
                             info.dropped_chunks
                         ));
                     }
@@ -645,11 +657,20 @@ impl SolYanAirPlayApp {
                     },
                 );
 
+                let effective_render_delay_ms = if self.prefs.video_low_latency {
+                    0
+                } else {
+                    self.prefs.render_delay_ms
+                };
                 metric(
                     &mut columns[2],
                     "Render lead",
-                    &format!("{} ms", self.prefs.render_delay_ms),
-                    "Retransmit headroom",
+                    &format!("{} ms", effective_render_delay_ms),
+                    if self.prefs.video_low_latency {
+                        "Video low-latency profile"
+                    } else {
+                        "Retransmit headroom"
+                    },
                 );
             });
         });
@@ -660,6 +681,29 @@ impl SolYanAirPlayApp {
             ui.label(RichText::new("Playback").size(17.0).strong().color(theme::TEXT));
             ui.add_space(8.0);
 
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Profile").color(theme::MUTED));
+                let enabled = !self.activity.is_streaming();
+                ui.add_enabled_ui(enabled, |ui| {
+                    if ui.selectable_label(!self.prefs.video_low_latency, "Music").clicked() {
+                        self.prefs.video_low_latency = false;
+                    }
+                    if ui.selectable_label(self.prefs.video_low_latency, "Video Low Latency").clicked() {
+                        self.prefs.video_low_latency = true;
+                    }
+                });
+            });
+            if self.prefs.video_low_latency {
+                ui.label(
+                    RichText::new(
+                        "Video mode removes SolYan's extra render lead. HomePod realtime ALAC can still have receiver-side latency; true frame-accurate sync requires video compensation or a lower-latency AirPlay transport.",
+                    )
+                    .size(11.0)
+                    .color(theme::ACCENT),
+                );
+            }
+
+            ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Volume").color(theme::MUTED));
                 let response = ui.add(
@@ -681,10 +725,10 @@ impl SolYanAirPlayApp {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Latency").color(theme::MUTED));
-                let enabled = !self.activity.is_streaming();
+                let enabled = !self.activity.is_streaming() && !self.prefs.video_low_latency;
                 ui.add_enabled_ui(enabled, |ui| {
                     ui.add(
-                        egui::Slider::new(&mut self.prefs.render_delay_ms, 80..=600)
+                        egui::Slider::new(&mut self.prefs.render_delay_ms, 0..=600)
                             .suffix(" ms"),
                     );
                     if ui.small_button("Low 200").clicked() {
@@ -819,7 +863,13 @@ impl SolYanAirPlayApp {
                         &mut columns[3],
                         "Captured",
                         &progress.captured_chunks.to_string(),
-                        &format!("silence {} • dropped {}", progress.silence_chunks, progress.dropped_chunks),
+                        &format!(
+                            "silence {} • late {} • transitions {} • dropped {}",
+                            progress.silence_chunks,
+                            progress.late_polls,
+                            progress.silence_transitions,
+                            progress.dropped_chunks
+                        ),
                     );
                 });
             }
