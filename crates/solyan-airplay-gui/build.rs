@@ -42,8 +42,8 @@ fn main() {
     res.set("FileDescription", "SolYan AirPlay2 - Windows AirPlay sender");
     res.set("CompanyName", "SolYan");
     res.set("LegalCopyright", "© 2026 SolYan");
-    res.set("ProductVersion", "0.2.5");
-    res.set("FileVersion", "0.2.5");
+    res.set("ProductVersion", "0.2.6");
+    res.set("FileVersion", "0.2.6");
     res.set("Comments", "Author: SolYan | https://www.youtube.com/@SolYan-Music");
     res.compile().expect("compile Windows resources");
 }

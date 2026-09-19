@@ -41,7 +41,11 @@ pub fn apply(ctx: &egui::Context) {
     let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
     style.spacing.item_spacing = egui::vec2(10.0, 10.0);
     style.spacing.button_padding = egui::vec2(14.0, 9.0);
-    style.spacing.slider_width = 360.0;
+    style.spacing.interact_size = egui::vec2(42.0, 30.0);
+    style.spacing.slider_width = 320.0;
+    style.spacing.slider_rail_height = 7.0;
+    style.spacing.icon_width = 18.0;
+    style.spacing.icon_width_inner = 11.0;
 
     let mut visuals = egui::Visuals::dark();
     visuals.panel_fill = BG;
@@ -51,16 +55,17 @@ pub fn apply(ctx: &egui::Context) {
     visuals.selection.bg_fill = ACCENT;
     visuals.selection.stroke = Stroke::new(2.0, ACCENT);
     visuals.slider_trailing_fill = true;
-    visuals.widgets.inactive.bg_fill = CARD;
-    visuals.widgets.inactive.weak_bg_fill = CARD;
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, BORDER);
-    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, TEXT);
-    visuals.widgets.hovered.bg_fill = CARD_HOVER;
-    visuals.widgets.hovered.weak_bg_fill = CARD_HOVER;
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(67, 69, 80));
-    visuals.widgets.active.bg_fill = ACCENT_SOFT;
+    visuals.widgets.inactive.bg_fill = Color32::from_rgb(32, 33, 39);
+    visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(29, 30, 36);
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.1, Color32::from_rgb(76, 79, 91));
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.1, TEXT);
+    visuals.widgets.hovered.bg_fill = ACCENT_SOFT;
+    visuals.widgets.hovered.weak_bg_fill = ACCENT_SOFT;
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.6, ACCENT);
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.3, TEXT);
+    visuals.widgets.active.bg_fill = ACCENT;
     visuals.widgets.active.weak_bg_fill = ACCENT_SOFT;
-    visuals.widgets.active.bg_stroke = Stroke::new(1.0, ACCENT);
+    visuals.widgets.active.bg_stroke = Stroke::new(1.8, ACCENT);
     visuals.widgets.open.bg_fill = CARD_HOVER;
     style.visuals = visuals;
 

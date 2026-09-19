@@ -123,7 +123,7 @@ impl SolYanAirPlayApp {
             logo_texture,
         };
 
-        app.log("SolYan AirPlay2 v0.2.5 GUI initialized.");
+        app.log("SolYan AirPlay2 v0.2.6 GUI initialized.");
         app.start_scan(cc.egui_ctx.clone());
         app
     }
@@ -147,7 +147,7 @@ impl SolYanAirPlayApp {
             .unwrap_or_else(|_| std::path::PathBuf::from("."));
         let desktop = base.join("Desktop");
         let dir = if desktop.is_dir() { desktop } else { base };
-        let path = dir.join("SolYan-AirPlay2-v0.2.5-log.txt");
+        let path = dir.join("SolYan-AirPlay2-v0.2.6-log.txt");
         match std::fs::write(&path, body) {
             Ok(()) => {
                 self.status = if self.prefs.vietnamese {
@@ -711,7 +711,8 @@ impl SolYanAirPlayApp {
                             });
                         })
                         .response
-                        .interact(Sense::click());
+                        .interact(Sense::click())
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
 
                     if response.clicked() && !self.activity.is_streaming() {
                         clicked_id = Some(device.id.clone());
@@ -867,7 +868,8 @@ impl SolYanAirPlayApp {
                         });
                     })
                     .response
-                    .interact(Sense::click());
+                    .interact(Sense::click())
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
 
                 if response.clicked() && !self.activity.is_streaming() {
                     clicked_pair_id = Some(pair.id.clone());
@@ -883,13 +885,13 @@ impl SolYanAirPlayApp {
 
     fn draw_stream_card(&mut self, ui: &mut egui::Ui) {
         theme::card().show(ui, |ui| {
-            ui.horizontal(|ui| {
+            let narrow = ui.available_width() < 660.0;
+
+            if narrow {
                 ui.vertical(|ui| {
                     ui.label(
                         RichText::new(self.tr("NOW STREAMING", "ĐANG PHÁT"))
-                            .size(11.0)
-                            .strong()
-                            .color(theme::MUTED),
+                            .size(11.0).strong().color(theme::MUTED),
                     );
                     let names = self.selected_name_list();
                     let title = if names.is_empty() {
@@ -897,89 +899,118 @@ impl SolYanAirPlayApp {
                     } else {
                         names.join("  +  ")
                     };
-                    ui.label(RichText::new(title).size(22.0).strong().color(theme::TEXT));
+                    ui.label(RichText::new(title).size(21.0).strong().color(theme::TEXT));
+                    ui.add_space(6.0);
+                    self.draw_start_stop_button(ui);
                 });
-
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if self.activity.is_streaming() {
-                        let stop = ui.add_sized(
-                            [112.0, 42.0],
-                            egui::Button::new(
-                                RichText::new(self.tr("Stop", "Dừng")).strong().color(Color32::WHITE),
-                            )
-                            .fill(theme::RED.gamma_multiply(0.78)),
+            } else {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new(self.tr("NOW STREAMING", "ĐANG PHÁT"))
+                                .size(11.0).strong().color(theme::MUTED),
                         );
-                        if stop.clicked() && self.activity == Activity::Streaming {
-                            self.stop_stream();
-                        }
-                    } else {
-                        let can_start = self.activity == Activity::Idle
-                            && !self.selected_ids.is_empty()
-                            && (!self.prefs.experimental_multiroom
-                                || self.selected_ids.len() == 1
-                                || self.selected_ids.len() >= 2);
-                        let start = ui.add_enabled(
-                            can_start,
-                            egui::Button::new(
-                                RichText::new(self.tr("Start", "Chạy"))
-                                    .strong()
-                                    .color(Color32::WHITE),
-                            )
-                            .fill(theme::ACCENT)
-                            .min_size(egui::vec2(148.0, 42.0)),
-                        );
-                        if start.clicked() {
-                            self.start_stream(ui.ctx().clone());
-                        }
-                    }
+                        let names = self.selected_name_list();
+                        let title = if names.is_empty() {
+                            self.tr("No speaker selected", "Chưa chọn thiết bị").to_string()
+                        } else {
+                            names.join("  +  ")
+                        };
+                        ui.label(RichText::new(title).size(22.0).strong().color(theme::TEXT));
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        self.draw_start_stop_button(ui);
+                    });
                 });
-            });
+            }
 
-            ui.add_space(16.0);
-            ui.separator();
             ui.add_space(14.0);
+            ui.separator();
+            ui.add_space(12.0);
 
-            ui.columns(3, |columns| {
-                metric(
-                    &mut columns[0],
-                    "Source",
-                    "Windows system audio",
-                    "WASAPI loopback",
-                );
+            let protocol = if self.selected_pair_id.is_some()
+                || (self.prefs.experimental_multiroom && self.selected_ids.len() >= 2)
+            {
+                "ALAC / PTP"
+            } else {
+                "ALAC / NTP"
+            };
+            let timing = if self.selected_pair_id.is_some() {
+                "HomePod stereo-pair timing"
+            } else if protocol.contains("PTP") {
+                "Experimental group timing"
+            } else {
+                "Realtime compatibility path"
+            };
 
-                let protocol = if self.selected_pair_id.is_some()
-                    || (self.prefs.experimental_multiroom && self.selected_ids.len() >= 2)
-                {
-                    "ALAC / PTP"
-                } else {
-                    "ALAC / NTP"
-                };
+            if ui.available_width() < 620.0 {
+                metric(ui, "Source", "Windows system audio", "WASAPI loopback");
+                ui.add_space(8.0);
+                metric(ui, "Protocol", protocol, timing);
+                ui.add_space(8.0);
                 metric(
-                    &mut columns[1],
-                    "Protocol",
-                    protocol,
-                    if self.selected_pair_id.is_some() {
-                        "HomePod stereo-pair timing"
-                    } else if protocol.contains("PTP") {
-                        "Experimental group timing"
-                    } else {
-                        "Realtime compatibility path"
-                    },
-                );
-
-                metric(
-                    &mut columns[2],
+                    ui,
                     "Render lead",
                     &format!("{} ms", self.prefs.render_delay_ms),
                     "Retransmit headroom",
                 );
-            });
+            } else {
+                ui.columns(3, |columns| {
+                    metric(&mut columns[0], "Source", "Windows system audio", "WASAPI loopback");
+                    metric(&mut columns[1], "Protocol", protocol, timing);
+                    metric(
+                        &mut columns[2],
+                        "Render lead",
+                        &format!("{} ms", self.prefs.render_delay_ms),
+                        "Retransmit headroom",
+                    );
+                });
+            }
         });
+    }
+
+    fn draw_start_stop_button(&mut self, ui: &mut egui::Ui) {
+        if self.activity.is_streaming() {
+            let stop = ui.add(
+                egui::Button::new(
+                    RichText::new(self.tr("Stop", "Dừng")).strong().color(Color32::WHITE),
+                )
+                .fill(theme::RED.gamma_multiply(0.86))
+                .stroke(Stroke::new(1.5, theme::RED))
+                .corner_radius(egui::CornerRadius::same(9))
+                .min_size(egui::vec2(122.0, 42.0)),
+            );
+            if stop.clicked() && self.activity == Activity::Streaming {
+                self.stop_stream();
+            }
+        } else {
+            let can_start = self.activity == Activity::Idle
+                && !self.selected_ids.is_empty()
+                && (!self.prefs.experimental_multiroom
+                    || self.selected_ids.len() == 1
+                    || self.selected_ids.len() >= 2);
+            let start = ui.add_enabled(
+                can_start,
+                egui::Button::new(
+                    RichText::new(self.tr("Start", "Chạy")).strong().color(Color32::WHITE),
+                )
+                .fill(theme::ACCENT)
+                .stroke(Stroke::new(1.5, theme::ACCENT))
+                .corner_radius(egui::CornerRadius::same(9))
+                .min_size(egui::vec2(148.0, 42.0)),
+            );
+            if start.clicked() {
+                self.start_stream(ui.ctx().clone());
+            }
+        }
     }
 
     fn draw_controls_card(&mut self, ui: &mut egui::Ui) {
         theme::card().show(ui, |ui| {
-            ui.label(RichText::new(self.tr("Playback", "Điều khiển")).size(17.0).strong().color(theme::TEXT));
+            ui.label(
+                RichText::new(self.tr("Playback", "Điều khiển"))
+                    .size(17.0).strong().color(theme::TEXT),
+            );
             ui.label(
                 RichText::new(self.tr(
                     "Adjust volume and latency. Use 200 ms for faster response; increase to 350–500 ms for more stability.",
@@ -988,37 +1019,39 @@ impl SolYanAirPlayApp {
                 .size(10.5)
                 .color(theme::MUTED),
             );
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(self.tr("Volume", "Âm lượng")).color(theme::MUTED));
-                ui.add_space(8.0);
+            ui.add_space(10.0);
 
+            ui.label(
+                RichText::new(self.tr("Volume", "Âm lượng"))
+                    .size(12.0).strong().color(theme::TEXT),
+            );
+            ui.horizontal_wrapped(|ui| {
+                let slider_w = (ui.available_width() - 100.0).clamp(180.0, 420.0);
                 let response = ui.scope(|ui| {
+                    ui.spacing_mut().slider_width = slider_w;
                     let visuals = ui.visuals_mut();
                     visuals.slider_trailing_fill = true;
-                    visuals.selection.bg_fill = theme::ACCENT;
-                    visuals.widgets.inactive.bg_fill = Color32::from_rgb(48, 49, 55);
-                    visuals.widgets.hovered.bg_fill = Color32::from_rgb(58, 59, 66);
-                    visuals.widgets.active.bg_fill = theme::ACCENT_SOFT;
-                    ui.spacing_mut().slider_width = 360.0;
+                    visuals.widgets.inactive.bg_fill = Color32::from_rgb(54, 55, 64);
+                    visuals.widgets.inactive.bg_stroke = Stroke::new(1.2, Color32::from_rgb(95, 98, 112));
+                    visuals.widgets.hovered.bg_fill = theme::ACCENT_SOFT;
+                    visuals.widgets.hovered.bg_stroke = Stroke::new(1.8, theme::ACCENT);
+                    visuals.widgets.active.bg_fill = theme::ACCENT;
                     ui.add(
                         egui::Slider::new(&mut self.prefs.volume, 0.0..=1.0)
                             .show_value(false),
                     )
-                }).inner;
+                }).inner
+                  .on_hover_text(self.tr("Drag to change volume", "Kéo để thay đổi âm lượng"));
 
-                ui.add_space(8.0);
                 egui::Frame::new()
                     .fill(theme::ACCENT_SOFT)
-                    .stroke(Stroke::new(1.0, theme::ACCENT))
+                    .stroke(Stroke::new(1.2, theme::ACCENT))
                     .corner_radius(egui::CornerRadius::same(8))
                     .inner_margin(egui::Margin::symmetric(12, 6))
                     .show(ui, |ui| {
                         ui.label(
                             RichText::new(format!("{:.0}%", self.prefs.volume * 100.0))
-                                .size(14.0)
-                                .strong()
-                                .color(theme::ACCENT),
+                                .size(14.0).strong().color(theme::ACCENT),
                         );
                     });
 
@@ -1029,42 +1062,79 @@ impl SolYanAirPlayApp {
                 }
             });
 
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(self.tr("Latency", "Độ trễ")).color(theme::MUTED));
-                let enabled = !self.activity.is_streaming();
-                ui.add_enabled_ui(enabled, |ui| {
+            ui.add_space(10.0);
+            ui.label(
+                RichText::new(self.tr("Latency", "Độ trễ"))
+                    .size(12.0).strong().color(theme::TEXT),
+            );
+
+            let enabled = !self.activity.is_streaming();
+            ui.add_enabled_ui(enabled, |ui| {
+                let slider_w = ui.available_width().clamp(200.0, 420.0);
+                ui.scope(|ui| {
+                    ui.spacing_mut().slider_width = slider_w;
+                    let visuals = ui.visuals_mut();
+                    visuals.slider_trailing_fill = true;
+                    visuals.widgets.inactive.bg_fill = Color32::from_rgb(54, 55, 64);
+                    visuals.widgets.inactive.bg_stroke = Stroke::new(1.2, Color32::from_rgb(95, 98, 112));
+                    visuals.widgets.hovered.bg_fill = theme::ACCENT_SOFT;
+                    visuals.widgets.hovered.bg_stroke = Stroke::new(1.8, theme::ACCENT);
+                    visuals.widgets.active.bg_fill = theme::ACCENT;
                     ui.add(
                         egui::Slider::new(&mut self.prefs.render_delay_ms, 0..=600)
                             .suffix(" ms"),
-                    );
-                    if ui.small_button("Low 200").clicked() {
+                    )
+                    .on_hover_text(self.tr("Drag to change latency", "Kéo để thay đổi độ trễ"));
+                });
+
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    let preset = |ui: &mut egui::Ui, label: &str, selected: bool| {
+                        let fill = if selected { theme::ACCENT_SOFT } else { Color32::from_rgb(34, 35, 42) };
+                        let stroke = if selected { theme::ACCENT } else { Color32::from_rgb(86, 89, 102) };
+                        ui.add(
+                            egui::Button::new(RichText::new(label).strong().color(theme::TEXT))
+                                .fill(fill)
+                                .stroke(Stroke::new(1.2, stroke))
+                                .corner_radius(egui::CornerRadius::same(8))
+                                .min_size(egui::vec2(86.0, 32.0)),
+                        )
+                    };
+                    if preset(ui, "Low 200", self.prefs.render_delay_ms == 200).clicked() {
                         self.prefs.render_delay_ms = 200;
                     }
-                    if ui.small_button("Stable 350").clicked() {
+                    if preset(ui, "Stable 350", self.prefs.render_delay_ms == 350).clicked() {
                         self.prefs.render_delay_ms = 350;
                     }
-                    if ui.small_button("Safe 500").clicked() {
+                    if preset(ui, "Safe 500", self.prefs.render_delay_ms == 500).clicked() {
                         self.prefs.render_delay_ms = 500;
                     }
                 });
             });
 
             ui.add_space(12.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 let enabled = self.activity == Activity::Idle;
-                if ui
-                    .add_enabled(enabled, egui::Button::new(self.tr("Test Windows audio", "Test âm thanh")))
-                    .clicked()
-                {
+                let test_audio = egui::Button::new(
+                    RichText::new(self.tr("Test Windows audio", "Test âm thanh")).strong(),
+                )
+                .fill(Color32::from_rgb(34, 35, 42))
+                .stroke(Stroke::new(1.2, Color32::from_rgb(86, 89, 102)))
+                .corner_radius(egui::CornerRadius::same(8))
+                .min_size(egui::vec2(128.0, 34.0));
+                if ui.add_enabled(enabled, test_audio).clicked() {
                     self.start_capture_test(ui.ctx().clone());
                 }
 
+                let test_airplay = egui::Button::new(
+                    RichText::new(self.tr("Test AirPlay session", "Test AirPlay")).strong(),
+                )
+                .fill(Color32::from_rgb(34, 35, 42))
+                .stroke(Stroke::new(1.2, Color32::from_rgb(86, 89, 102)))
+                .corner_radius(egui::CornerRadius::same(8))
+                .min_size(egui::vec2(116.0, 34.0));
                 if ui
-                    .add_enabled(
-                        enabled && !self.selected_ids.is_empty(),
-                        egui::Button::new(self.tr("Test AirPlay session", "Test AirPlay")),
-                    )
+                    .add_enabled(enabled && !self.selected_ids.is_empty(), test_airplay)
                     .clicked()
                 {
                     self.start_connection_test(ui.ctx().clone());
@@ -1140,7 +1210,7 @@ impl SolYanAirPlayApp {
                             .color(theme::ACCENT),
                     );
                     ui.label(
-                        RichText::new("· SolYan AirPlay2 v0.2.5")
+                        RichText::new("· SolYan AirPlay2 v0.2.6")
                             .size(11.5)
                             .strong()
                             .color(theme::TEXT),
