@@ -4,7 +4,7 @@ use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
 use eframe::egui::{self, Align, Color32, Layout, RichText, Sense, Stroke};
 use serde::{Deserialize, Serialize};
 use solyan_airplay_core::device_profile::DeviceKind;
-use solyan_airplay_core::discovery::AirPlayReceiver;
+use solyan_airplay_core::discovery::{detect_homepod_pairs, AirPlayReceiver, HomePodPair};
 use solyan_airplay_core::live::{LiveStreamMode, StreamControl, StreamProgress};
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -66,6 +66,8 @@ impl Activity {
 pub struct SolYanAirPlayApp {
     prefs: Preferences,
     devices: Vec<AirPlayReceiver>,
+    homepod_pairs: Vec<HomePodPair>,
+    selected_pair_id: Option<String>,
     selected_ids: Vec<String>,
     activity: Activity,
     status: String,
@@ -107,6 +109,8 @@ impl SolYanAirPlayApp {
         let mut app = Self {
             prefs,
             devices: Vec::new(),
+            homepod_pairs: Vec::new(),
+            selected_pair_id: None,
             selected_ids: Vec::new(),
             activity: Activity::Idle,
             status: "Ready to discover HomePod and AirPlay receivers.".into(),
@@ -179,7 +183,16 @@ impl SolYanAirPlayApp {
             return;
         }
 
-        let mode = if self.prefs.experimental_multiroom && self.selected_ids.len() >= 2 {
+        let pair_selected = self.selected_pair_id.is_some();
+        let mode = if pair_selected {
+            if self.selected_ids.len() != 2 {
+                self.last_error = Some(
+                    "HomePod stereo pair requires exactly two discovered members.".into(),
+                );
+                return;
+            }
+            LiveStreamMode::MultiroomExperimental
+        } else if self.prefs.experimental_multiroom && self.selected_ids.len() >= 2 {
             LiveStreamMode::MultiroomExperimental
         } else {
             if self.selected_ids.len() != 1 {
@@ -201,7 +214,9 @@ impl SolYanAirPlayApp {
         self.last_error = None;
 
         let target_count = self.selected_ids.len();
-        self.status = if mode == LiveStreamMode::MultiroomExperimental {
+        self.status = if self.selected_pair_id.is_some() {
+            "Connecting to HomePod stereo pair using grouped PTP timing...".into()
+        } else if mode == LiveStreamMode::MultiroomExperimental {
             format!("Building experimental PTP group for {target_count} speakers...")
         } else {
             "Connecting and starting realtime ALAC stream...".into()
@@ -216,9 +231,18 @@ impl SolYanAirPlayApp {
                     effective_render_delay_ms
                 )
             }
-            LiveStreamMode::MultiroomExperimental => format!(
-                "Starting EXPERIMENTAL multiroom stream to {target_count} speakers using PTP."
-            ),
+            LiveStreamMode::MultiroomExperimental => {
+                if let Some(pair_id) = &self.selected_pair_id {
+                    format!(
+                        "Starting HomePod stereo pair route {} with {} members using PTP.",
+                        pair_id, target_count
+                    )
+                } else {
+                    format!(
+                        "Starting EXPERIMENTAL multiroom stream to {target_count} speakers using PTP."
+                    )
+                }
+            },
         });
 
         worker::spawn_stream(
@@ -242,6 +266,7 @@ impl SolYanAirPlayApp {
     }
 
     fn set_selected(&mut self, id: String) {
+        self.selected_pair_id = None;
         if self.prefs.experimental_multiroom {
             if let Some(pos) = self.selected_ids.iter().position(|v| v == &id) {
                 self.selected_ids.remove(pos);
@@ -257,6 +282,12 @@ impl SolYanAirPlayApp {
     }
 
     fn selected_name_list(&self) -> Vec<String> {
+        if let Some(pair_id) = &self.selected_pair_id {
+            if let Some(pair) = self.homepod_pairs.iter().find(|p| &p.id == pair_id) {
+                return vec![pair.name.clone()];
+            }
+        }
+
         self.selected_ids
             .iter()
             .filter_map(|id| {
@@ -268,6 +299,21 @@ impl SolYanAirPlayApp {
             .collect()
     }
 
+    fn set_selected_pair(&mut self, pair_id: String) {
+        let Some(pair) = self.homepod_pairs.iter().find(|p| p.id == pair_id) else {
+            return;
+        };
+
+        self.selected_pair_id = Some(pair.id.clone());
+        self.selected_ids = pair.member_ids.clone();
+        self.prefs.last_receiver_id = Some(pair.leader_id.clone());
+        self.log(format!(
+            "HomePod stereo pair selected: {} [{}].",
+            pair.name,
+            pair.member_names.join(" + ")
+        ));
+    }
+
     fn handle_event(&mut self, event: GuiEvent) {
         match event {
             GuiEvent::ScanFinished(result) => {
@@ -277,7 +323,14 @@ impl SolYanAirPlayApp {
                         self.log(format!("Discovery complete: {} receiver(s).", devices.len()));
                         let mut devices = devices;
                         devices.sort_by_key(|device| device_sort_rank(device.device_kind()));
+                        self.homepod_pairs = detect_homepod_pairs(&devices);
                         self.devices = devices;
+
+                        if let Some(pair_id) = &self.selected_pair_id {
+                            if !self.homepod_pairs.iter().any(|p| &p.id == pair_id) {
+                                self.selected_pair_id = None;
+                            }
+                        }
 
                         self.selected_ids
                             .retain(|id| self.devices.iter().any(|d| &d.id == id));
@@ -292,7 +345,10 @@ impl SolYanAirPlayApp {
                         if self.selected_ids.is_empty() && self.devices.len() == 1 {
                             self.selected_ids.push(self.devices[0].id.clone());
                         }
-                        if !self.prefs.experimental_multiroom && self.selected_ids.len() > 1 {
+                        if self.selected_pair_id.is_none()
+                            && !self.prefs.experimental_multiroom
+                            && self.selected_ids.len() > 1
+                        {
                             self.selected_ids.truncate(1);
                         }
 
@@ -310,10 +366,11 @@ impl SolYanAirPlayApp {
                                 .filter(|device| device.device_kind().is_apple_tv())
                                 .count();
                             format!(
-                                "{} AirPlay device(s) — {} HomePod, {} Apple TV.",
+                                "{} AirPlay device(s) — {} HomePod, {} Apple TV, {} HomePod pair(s).",
                                 self.devices.len(),
                                 homepods,
-                                apple_tvs
+                                apple_tvs,
+                                self.homepod_pairs.len()
                             )
                         };
                     }
