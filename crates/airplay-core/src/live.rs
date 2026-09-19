@@ -51,6 +51,7 @@ impl StreamControl {
 pub struct StreamProgress {
     pub elapsed_secs: f64,
     pub captured_chunks: u64,
+    pub silence_chunks: u64,
     pub dropped_chunks: u64,
     pub packets_sent: u64,
     pub retransmit_requested: u64,
@@ -64,6 +65,7 @@ pub struct StreamProgress {
 pub struct LiveStreamResult {
     pub target_names: Vec<String>,
     pub captured_chunks: u64,
+    pub silence_chunks: u64,
     pub dropped_chunks: u64,
     pub elapsed: Duration,
 }
@@ -149,8 +151,10 @@ pub async fn run_live_stream(
 ) -> Result<LiveStreamResult> {
     const SAMPLE_RATE: u32 = 44_100;
     const CHANNELS: u8 = 2;
+    const CHUNK_FRAMES: usize = 352;
     const PREBUFFER_CHUNKS: u64 = 25;
     const LIVE_QUEUE_CHUNKS: usize = 64;
+    const FRAME_WAIT: Duration = Duration::from_millis(8);
 
     let mut client = AirPlayClient::new()?;
     client.set_render_delay_ms(render_delay_ms);
@@ -189,24 +193,30 @@ pub async fn run_live_stream(
     let (sender, decoder) =
         LiveAudioDecoder::create_pair(SAMPLE_RATE, CHANNELS, LIVE_QUEUE_CHUNKS);
 
-    let prebuffer_deadline = Instant::now() + Duration::from_secs(5);
+    // AirPlay needs data ready before RECORD starts. A quiet Windows endpoint is
+    // perfectly valid, so seed the decoder with real PCM when available and
+    // synthetic silence otherwise. Audio can begin later without reconnecting.
     let mut prebuffered = 0u64;
+    let mut silence_chunks = 0u64;
     while prebuffered < PREBUFFER_CHUNKS && !control.is_stopped() {
-        if Instant::now() >= prebuffer_deadline {
-            capture.stop();
-            let _ = client.disconnect().await;
-            bail!("WASAPI prebuffer timed out; play audio on Windows and retry");
-        }
-
-        if let Ok(chunk) = capture.recv_timeout(Duration::from_millis(100)) {
-            let frame = LivePcmFrame {
+        let frame = match capture.poll_timeout(FRAME_WAIT)? {
+            Some(chunk) => LivePcmFrame {
                 samples: chunk.samples,
                 channels: chunk.channels as u8,
                 sample_rate: chunk.sample_rate,
-            };
-            if sender.try_send(frame) {
-                prebuffered += 1;
+            },
+            None => {
+                silence_chunks += 1;
+                LivePcmFrame {
+                    samples: vec![0; CHUNK_FRAMES * CHANNELS as usize],
+                    channels: CHANNELS,
+                    sample_rate: SAMPLE_RATE,
+                }
             }
+        };
+
+        if sender.try_send(frame) {
+            prebuffered += 1;
         }
     }
 
@@ -233,17 +243,33 @@ pub async fn run_live_stream(
     let mut next_progress = Instant::now() + Duration::from_millis(500);
 
     while !control.is_stopped() {
-        if let Ok(chunk) = capture.recv_timeout(Duration::from_millis(50)) {
-            let frame = LivePcmFrame {
-                samples: chunk.samples,
-                channels: chunk.channels as u8,
-                sample_rate: chunk.sample_rate,
-            };
-            if sender.try_send(frame) {
-                captured_chunks += 1;
+        let (frame, is_silence) = match capture.poll_timeout(FRAME_WAIT)? {
+            Some(chunk) => (
+                LivePcmFrame {
+                    samples: chunk.samples,
+                    channels: chunk.channels as u8,
+                    sample_rate: chunk.sample_rate,
+                },
+                false,
+            ),
+            None => (
+                LivePcmFrame {
+                    samples: vec![0; CHUNK_FRAMES * CHANNELS as usize],
+                    channels: CHANNELS,
+                    sample_rate: SAMPLE_RATE,
+                },
+                true,
+            ),
+        };
+
+        if sender.try_send(frame) {
+            if is_silence {
+                silence_chunks += 1;
             } else {
-                dropped_chunks += 1;
+                captured_chunks += 1;
             }
+        } else {
+            dropped_chunks += 1;
         }
 
         let desired_volume = control.volume();
@@ -265,6 +291,7 @@ pub async fn run_live_stream(
                 let _ = tx.try_send(StreamProgress {
                     elapsed_secs: started.elapsed().as_secs_f64(),
                     captured_chunks,
+                    silence_chunks,
                     dropped_chunks,
                     packets_sent: stats.packets_sent,
                     retransmit_requested: stats.rtx_requested,
@@ -286,6 +313,7 @@ pub async fn run_live_stream(
     Ok(LiveStreamResult {
         target_names,
         captured_chunks,
+        silence_chunks,
         dropped_chunks,
         elapsed: started.elapsed(),
     })
