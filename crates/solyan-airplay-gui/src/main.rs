@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 fn embedded_logo_png() -> Vec<u8> {
     base64::engine::general_purpose::STANDARD
-        .decode(include_str!("../assets/solyan-airplay-logo.b64").trim())
+        .decode(concat!(include_str!("../assets/solyan-airplay-logo.0.b64"), include_str!("../assets/solyan-airplay-logo.1.b64"), include_str!("../assets/solyan-airplay-logo.2.b64"), include_str!("../assets/solyan-airplay-logo.3.b64")))
         .expect("embedded SolYan AirPlay logo must decode")
 }
 
