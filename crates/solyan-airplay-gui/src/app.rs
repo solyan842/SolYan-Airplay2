@@ -123,7 +123,7 @@ impl SolYanAirPlayApp {
             logo_texture,
         };
 
-        app.log("SolYan AirPlay2 v0.2.4 GUI initialized.");
+        app.log("SolYan AirPlay2 v0.2.5 GUI initialized.");
         app.start_scan(cc.egui_ctx.clone());
         app
     }
@@ -147,7 +147,7 @@ impl SolYanAirPlayApp {
             .unwrap_or_else(|_| std::path::PathBuf::from("."));
         let desktop = base.join("Desktop");
         let dir = if desktop.is_dir() { desktop } else { base };
-        let path = dir.join("SolYan-AirPlay2-v0.2.4-log.txt");
+        let path = dir.join("SolYan-AirPlay2-v0.2.5-log.txt");
         match std::fs::write(&path, body) {
             Ok(()) => {
                 self.status = if self.prefs.vietnamese {
@@ -551,10 +551,40 @@ impl SolYanAirPlayApp {
                     self.export_log();
                 }
 
-                let lang = if self.prefs.vietnamese { "VI" } else { "EN" };
-                if ui.small_button(lang).clicked() {
-                    self.prefs.vietnamese = !self.prefs.vietnamese;
-                }
+                egui::Frame::new()
+                    .fill(theme::ACCENT_SOFT.gamma_multiply(0.72))
+                    .stroke(Stroke::new(1.0, theme::ACCENT.gamma_multiply(0.75)))
+                    .corner_radius(egui::CornerRadius::same(16))
+                    .inner_margin(egui::Margin::symmetric(4, 3))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 3.0;
+                            let vi_fill = if self.prefs.vietnamese { theme::ACCENT } else { theme::CARD };
+                            let en_fill = if self.prefs.vietnamese { theme::CARD } else { theme::ACCENT };
+                            let vi_text = if self.prefs.vietnamese { Color32::WHITE } else { theme::MUTED };
+                            let en_text = if self.prefs.vietnamese { theme::MUTED } else { Color32::WHITE };
+
+                            if ui.add(
+                                egui::Button::new(RichText::new("VI").strong().color(vi_text))
+                                    .fill(vi_fill)
+                                    .stroke(Stroke::new(1.0, theme::ACCENT.gamma_multiply(0.5)))
+                                    .corner_radius(egui::CornerRadius::same(12))
+                                    .min_size(egui::vec2(38.0, 28.0)),
+                            ).clicked() {
+                                self.prefs.vietnamese = true;
+                            }
+
+                            if ui.add(
+                                egui::Button::new(RichText::new("ENG").strong().color(en_text))
+                                    .fill(en_fill)
+                                    .stroke(Stroke::new(1.0, theme::ACCENT.gamma_multiply(0.5)))
+                                    .corner_radius(egui::CornerRadius::same(12))
+                                    .min_size(egui::vec2(48.0, 28.0)),
+                            ).clicked() {
+                                self.prefs.vietnamese = false;
+                            }
+                        });
+                    });
             });
         });
 
@@ -591,8 +621,11 @@ impl SolYanAirPlayApp {
         ui.add_space(8.0);
 
         let mut clicked_id: Option<String> = None;
-        let pair_reserved = if self.homepod_pairs.is_empty() { 132.0 } else { 178.0 };
-        let list_height = (ui.available_height() - 220.0 - pair_reserved).max(180.0);
+        // Keep the device list usable at both low and high resolutions.
+        // The whole sidebar can also scroll, so this list must never consume
+        // an unbounded parent height.
+        let viewport_h = ui.ctx().content_rect().height();
+        let list_height = (viewport_h * 0.42).clamp(160.0, 390.0);
         egui::ScrollArea::vertical()
             .id_salt("speaker-list")
             .auto_shrink([false, false])
@@ -1101,7 +1134,7 @@ impl SolYanAirPlayApp {
                             .color(theme::ACCENT),
                     );
                     ui.label(
-                        RichText::new("· SolYan AirPlay2 v0.2.4")
+                        RichText::new("· SolYan AirPlay2 v0.2.5")
                             .size(11.5)
                             .strong()
                             .color(theme::TEXT),
@@ -1147,14 +1180,13 @@ impl eframe::App for SolYanAirPlayApp {
 
         ui.add_space(4.0);
         self.draw_header(ui);
-        ui.add_space(12.0);
+        ui.add_space(10.0);
 
-        // The footer owns the bottom of the window. It is never placed after the
-        // content flow, so a tall sidebar/diagnostics panel cannot push it offscreen.
+        // Footer is fixed. Everything above it gets its own viewport and can
+        // scroll instead of being clipped on 720p / small windows.
         let available = ui.available_rect_before_wrap();
         let footer_height = 44.0f32;
         let footer_gap = 8.0f32;
-
         let footer_top = (available.bottom() - footer_height).max(available.top());
         let body_bottom = (footer_top - footer_gap).max(available.top());
 
@@ -1167,54 +1199,92 @@ impl eframe::App for SolYanAirPlayApp {
             available.max,
         );
 
+        let draw_right = |this: &mut SolYanAirPlayApp, ui: &mut egui::Ui| {
+            this.draw_stream_card(ui);
+            ui.add_space(10.0);
+            this.draw_controls_card(ui);
+            ui.add_space(10.0);
+            this.draw_multiroom_card(ui);
+            ui.add_space(10.0);
+            egui::Frame::new()
+                .fill(theme::ACCENT_SOFT.gamma_multiply(0.45))
+                .stroke(Stroke::new(1.0, theme::ACCENT.gamma_multiply(0.35)))
+                .corner_radius(egui::CornerRadius::same(10))
+                .inner_margin(egui::Margin::symmetric(12, 8))
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(this.tr(
+                            "AirPlay may introduce latency or A/V sync offset due to protocol buffering and synchronization.",
+                            "AirPlay có thể xảy ra trễ hoặc lệch tiếng/hình do cơ chế đệm và đồng bộ của giao thức.",
+                        ))
+                        .size(10.5)
+                        .color(theme::MUTED),
+                    );
+                });
+            ui.add_space(6.0);
+        };
+
         ui.scope_builder(
             egui::UiBuilder::new()
                 .max_rect(body_rect)
-                .layout(Layout::left_to_right(Align::Min)),
+                .layout(Layout::top_down(Align::Min)),
             |ui| {
-                let available_height = body_rect.height();
-                let device_panel_width = (body_rect.width() * 0.35).clamp(460.0, 650.0);
+                let body_w = body_rect.width();
+                let body_h = body_rect.height();
 
-                ui.allocate_ui_with_layout(
-                    egui::vec2(device_panel_width, available_height),
-                    Layout::top_down(Align::Min),
-                    |ui| {
-                        theme::sidebar_card().show(ui, |ui| {
-                            ui.set_min_height((available_height - 4.0).max(120.0));
-                            self.draw_sidebar(ui);
-                        });
-                    },
-                );
-
-                ui.add_space(10.0);
-
-                ui.allocate_ui_with_layout(
-                    egui::vec2(ui.available_width(), available_height),
-                    Layout::top_down(Align::Min),
-                    |ui| {
-                        self.draw_stream_card(ui);
-                        ui.add_space(10.0);
-                        self.draw_controls_card(ui);
-                        ui.add_space(10.0);
-                        self.draw_multiroom_card(ui);
-                        ui.add_space(10.0);
-                        egui::Frame::new()
-                            .fill(theme::ACCENT_SOFT.gamma_multiply(0.45))
-                            .stroke(Stroke::new(1.0, theme::ACCENT.gamma_multiply(0.35)))
-                            .corner_radius(egui::CornerRadius::same(10))
-                            .inner_margin(egui::Margin::symmetric(12, 8))
-                            .show(ui, |ui| {
-                                ui.label(
-                                    RichText::new(self.tr(
-                                        "AirPlay may introduce latency or A/V sync offset due to protocol buffering and synchronization.",
-                                        "AirPlay có thể xảy ra trễ hoặc lệch tiếng/hình do cơ chế đệm và đồng bộ của giao thức.",
-                                    ))
-                                    .size(10.5)
-                                    .color(theme::MUTED),
-                                );
+                // At narrow widths use one natural vertical page. At normal desktop
+                // widths keep the two-column design with independent scrolling.
+                if body_w < 980.0 {
+                    egui::ScrollArea::vertical()
+                        .id_salt("responsive-single-column")
+                        .auto_shrink([false, false])
+                        .max_height(body_h)
+                        .show(ui, |ui| {
+                            theme::sidebar_card().show(ui, |ui| {
+                                self.draw_sidebar(ui);
                             });
-                    },
-                );
+                            ui.add_space(10.0);
+                            draw_right(self, ui);
+                        });
+                } else {
+                    ui.horizontal(|ui| {
+                        let sidebar_w = (body_w * 0.34).clamp(340.0, 560.0);
+                        let right_w = (body_w - sidebar_w - 10.0).max(420.0);
+
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(sidebar_w, body_h),
+                            Layout::top_down(Align::Min),
+                            |ui| {
+                                egui::ScrollArea::vertical()
+                                    .id_salt("sidebar-viewport")
+                                    .auto_shrink([false, false])
+                                    .max_height(body_h)
+                                    .show(ui, |ui| {
+                                        theme::sidebar_card().show(ui, |ui| {
+                                            self.draw_sidebar(ui);
+                                        });
+                                        ui.add_space(4.0);
+                                    });
+                            },
+                        );
+
+                        ui.add_space(10.0);
+
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(right_w, body_h),
+                            Layout::top_down(Align::Min),
+                            |ui| {
+                                egui::ScrollArea::vertical()
+                                    .id_salt("main-viewport")
+                                    .auto_shrink([false, false])
+                                    .max_height(body_h)
+                                    .show(ui, |ui| {
+                                        draw_right(self, ui);
+                                    });
+                            },
+                        );
+                    });
+                }
             },
         );
 
