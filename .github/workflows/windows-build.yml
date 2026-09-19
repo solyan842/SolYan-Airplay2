@@ -5,7 +5,7 @@ on:
     branches: [main, "dev/**"]
 
 concurrency:
-  group: windows-build-${{ github.ref }}
+  group: solyan-v016-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
