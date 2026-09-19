@@ -152,8 +152,8 @@ pub async fn run_live_stream(
     const SAMPLE_RATE: u32 = 44_100;
     const CHANNELS: u8 = 2;
     const CHUNK_FRAMES: usize = 352;
-    const PREBUFFER_CHUNKS: u64 = 25;
-    const LIVE_QUEUE_CHUNKS: usize = 64;
+    const PREBUFFER_CHUNKS: u64 = 64;
+    const LIVE_QUEUE_CHUNKS: usize = 96;
     const FRAME_WAIT: Duration = Duration::from_millis(8);
 
     let mut client = AirPlayClient::new()?;
@@ -262,7 +262,9 @@ pub async fn run_live_stream(
             ),
         };
 
-        if sender.try_send(frame) {
+        // Preserve PCM continuity. Blocking briefly here is preferable to dropping
+        // a 352-frame chunk, which creates an audible discontinuity/click.
+        if sender.send(frame) {
             if is_silence {
                 silence_chunks += 1;
             } else {
