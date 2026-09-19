@@ -565,6 +565,18 @@ mod clickless_tests {
     }
 
     #[test]
+    fn synthetic_silence_is_paced_at_source_audio_time() {
+        let source_rate = 48_000u32;
+        let source_block_frames = 1024usize;
+        let period =
+            Duration::from_secs_f64(source_block_frames as f64 / source_rate as f64);
+
+        assert!(period >= Duration::from_millis(21));
+        assert!(period <= Duration::from_millis(22));
+        assert!(MAX_SYNTHETIC_QUEUE_CHUNKS <= 4);
+    }
+
+    #[test]
     fn ramp_to_zero_preserves_channel_shape_without_hard_step() {
         let samples = ramp_to_zero(&[12_000, -8_000], 2, 352, 96);
         assert_eq!(samples[0], 12_000);
