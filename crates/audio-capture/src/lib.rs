@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -35,6 +35,7 @@ pub struct CaptureHandle {
     pub format: AudioFormat,
     rx: Receiver<CapturedChunk>,
     running: Arc<AtomicBool>,
+    captured_frames: Arc<AtomicU64>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
@@ -54,6 +55,10 @@ impl CaptureHandle {
                 Err(anyhow!("WASAPI capture worker disconnected"))
             }
         }
+    }
+
+    pub fn total_frames(&self) -> u64 {
+        self.captured_frames.load(Ordering::Relaxed)
     }
 
     pub fn stop(&mut self) {
@@ -182,6 +187,8 @@ pub fn start_default_loopback(_requested: AudioFormat) -> Result<CaptureHandle> 
         std::sync::mpsc::sync_channel::<Result<(String, AudioFormat), String>>(1);
     let running = Arc::new(AtomicBool::new(true));
     let thread_running = Arc::clone(&running);
+    let captured_frames = Arc::new(AtomicU64::new(0));
+    let thread_captured_frames = Arc::clone(&captured_frames);
 
     let handle = thread::Builder::new()
         .name("solyan-wasapi-loopback".into())
@@ -297,6 +304,7 @@ pub fn start_default_loopback(_requested: AudioFormat) -> Result<CaptureHandle> 
                             .read_from_device_to_deque(&mut raw)
                             .map_err(|e| format!("capture read: {e}"))?;
 
+                        thread_captured_frames.fetch_add(frames as u64, Ordering::Relaxed);
                         let bytes: Vec<u8> = raw.drain(..).collect();
                         let converted = convert_native_to_stereo_i16(
                             &bytes,
@@ -350,6 +358,7 @@ pub fn start_default_loopback(_requested: AudioFormat) -> Result<CaptureHandle> 
         format,
         rx,
         running,
+        captured_frames,
         thread: Some(handle),
     })
 }
