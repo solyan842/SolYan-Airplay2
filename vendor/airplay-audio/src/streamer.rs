@@ -1125,6 +1125,19 @@ async fn run_streamer(
                 }
             }
 
+            // Last-chance refill before consuming the next RTP frame.
+            // The dedicated sender thread already holds ~256ms of scheduled packets,
+            // so use that headroom to recover from a brief decoder/WASAPI stall
+            // instead of skipping one RTP timestamp and creating an audible tick.
+            if guard.buffer.is_empty() && guard.live_decoder.is_some() {
+                for _ in 0..6 {
+                    decode_some_inner(&mut guard)?;
+                    if !guard.buffer.is_empty() {
+                        break;
+                    }
+                }
+            }
+
             let frame = guard.buffer.pop();
             if let Some(frame) = frame {
                 // Diagnostic: log PCM sample energy for first few frames
