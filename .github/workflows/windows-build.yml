@@ -2,7 +2,9 @@ name: Windows build
 
 on:
   push:
-    branches: [main, "dev/**"]
+    branches: [main, "dev/**", "stable/**"]
+  pull_request:
+    branches: ["stable/**"]
 
 concurrency:
   group: solyan-v0213-${{ github.ref }}
