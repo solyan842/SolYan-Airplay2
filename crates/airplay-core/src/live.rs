@@ -52,6 +52,8 @@ pub struct StreamProgress {
     pub elapsed_secs: f64,
     pub captured_chunks: u64,
     pub silence_chunks: u64,
+    pub late_polls: u64,
+    pub silence_transitions: u64,
     pub dropped_chunks: u64,
     pub packets_sent: u64,
     pub retransmit_requested: u64,
@@ -66,6 +68,8 @@ pub struct LiveStreamResult {
     pub target_names: Vec<String>,
     pub captured_chunks: u64,
     pub silence_chunks: u64,
+    pub late_polls: u64,
+    pub silence_transitions: u64,
     pub dropped_chunks: u64,
     pub elapsed: Duration,
 }
@@ -154,7 +158,10 @@ pub async fn run_live_stream(
     const CHUNK_FRAMES: usize = 352;
     const PREBUFFER_CHUNKS: u64 = 64;
     const LIVE_QUEUE_CHUNKS: usize = 96;
-    const FRAME_WAIT: Duration = Duration::from_millis(8);
+    const SILENCE_POLL: Duration = Duration::from_millis(8);
+    const ACTIVE_POLL: Duration = Duration::from_millis(20);
+    const SILENCE_GRACE: Duration = Duration::from_millis(120);
+    const TRANSITION_FRAMES: usize = 96;
 
     let mut client = AirPlayClient::new()?;
     client.set_render_delay_ms(render_delay_ms);
@@ -193,30 +200,20 @@ pub async fn run_live_stream(
     let (sender, decoder) =
         LiveAudioDecoder::create_pair(SAMPLE_RATE, CHANNELS, LIVE_QUEUE_CHUNKS);
 
-    // AirPlay needs data ready before RECORD starts. A quiet Windows endpoint is
-    // perfectly valid, so seed the decoder with real PCM when available and
-    // synthetic silence otherwise. Audio can begin later without reconnecting.
+    // Prime AirPlay with pure silence only. Mixing "maybe real / maybe silence"
+    // during session startup can create a discontinuity exactly when RECORD starts.
+    // The first real PCM block is faded in after streaming is established.
     let mut prebuffered = 0u64;
     let mut silence_chunks = 0u64;
     while prebuffered < PREBUFFER_CHUNKS && !control.is_stopped() {
-        let frame = match capture.poll_timeout(FRAME_WAIT)? {
-            Some(chunk) => LivePcmFrame {
-                samples: chunk.samples,
-                channels: chunk.channels as u8,
-                sample_rate: chunk.sample_rate,
-            },
-            None => {
-                silence_chunks += 1;
-                LivePcmFrame {
-                    samples: vec![0; CHUNK_FRAMES * CHANNELS as usize],
-                    channels: CHANNELS,
-                    sample_rate: SAMPLE_RATE,
-                }
-            }
+        let frame = LivePcmFrame {
+            samples: vec![0; CHUNK_FRAMES * CHANNELS as usize],
+            channels: CHANNELS,
+            sample_rate: SAMPLE_RATE,
         };
-
-        if sender.try_send(frame) {
+        if sender.send(frame) {
             prebuffered += 1;
+            silence_chunks += 1;
         }
     }
 
@@ -239,39 +236,103 @@ pub async fn run_live_stream(
     let started = Instant::now();
     let mut captured_chunks = 0u64;
     let mut dropped_chunks = 0u64;
+    let mut late_polls = 0u64;
+    let mut silence_transitions = 0u64;
+    let mut in_silence = true;
+    let mut last_real_at: Option<Instant> = None;
+    let mut last_samples = vec![0i16; CHANNELS as usize];
     let mut next_feedback = Instant::now() + Duration::from_secs(2);
     let mut next_progress = Instant::now() + Duration::from_millis(500);
 
     while !control.is_stopped() {
-        let (frame, is_silence) = match capture.poll_timeout(FRAME_WAIT)? {
-            Some(chunk) => (
-                LivePcmFrame {
-                    samples: chunk.samples,
+        let poll_window = if in_silence { SILENCE_POLL } else { ACTIVE_POLL };
+
+        match capture.poll_timeout(poll_window)? {
+            Some(chunk) => {
+                let mut samples = chunk.samples;
+
+                if in_silence {
+                    fade_in_from_zero(
+                        &mut samples,
+                        chunk.channels as usize,
+                        TRANSITION_FRAMES,
+                    );
+                    in_silence = false;
+                    silence_transitions += 1;
+                }
+
+                remember_last_samples(
+                    &samples,
+                    chunk.channels as usize,
+                    &mut last_samples,
+                );
+
+                let frame = LivePcmFrame {
+                    samples,
                     channels: chunk.channels as u8,
                     sample_rate: chunk.sample_rate,
-                },
-                false,
-            ),
-            None => (
-                LivePcmFrame {
-                    samples: vec![0; CHUNK_FRAMES * CHANNELS as usize],
-                    channels: CHANNELS,
-                    sample_rate: SAMPLE_RATE,
-                },
-                true,
-            ),
-        };
+                };
 
-        // Preserve PCM continuity. Blocking briefly here is preferable to dropping
-        // a 352-frame chunk, which creates an audible discontinuity/click.
-        if sender.send(frame) {
-            if is_silence {
-                silence_chunks += 1;
-            } else {
-                captured_chunks += 1;
+                if sender.send(frame) {
+                    captured_chunks += 1;
+                    last_real_at = Some(Instant::now());
+                } else {
+                    dropped_chunks += 1;
+                }
             }
-        } else {
-            dropped_chunks += 1;
+            None => {
+                late_polls += 1;
+
+                if !in_silence {
+                    let grace_elapsed = last_real_at
+                        .map(|t| t.elapsed() >= SILENCE_GRACE)
+                        .unwrap_or(false);
+
+                    // A short WASAPI scheduling gap is normal. Do NOT inject a zero
+                    // packet here: the 400-500ms audio buffer is specifically there
+                    // to absorb this jitter. Inserting zero after one late poll was
+                    // the source of intermittent clicks in v0.1.5.
+                    if !grace_elapsed {
+                        continue;
+                    }
+
+                    let samples = ramp_to_zero(
+                        &last_samples,
+                        CHANNELS as usize,
+                        CHUNK_FRAMES,
+                        TRANSITION_FRAMES,
+                    );
+                    let frame = LivePcmFrame {
+                        samples,
+                        channels: CHANNELS,
+                        sample_rate: SAMPLE_RATE,
+                    };
+
+                    if sender.send(frame) {
+                        silence_chunks += 1;
+                        silence_transitions += 1;
+                        in_silence = true;
+                        last_samples.fill(0);
+                    } else {
+                        dropped_chunks += 1;
+                    }
+                } else {
+                    // Once truly silent, keep the AirPlay pipeline clocked at the
+                    // packet cadence. Real PCM will replace silence immediately and
+                    // receives a short fade-in on the transition back.
+                    let frame = LivePcmFrame {
+                        samples: vec![0; CHUNK_FRAMES * CHANNELS as usize],
+                        channels: CHANNELS,
+                        sample_rate: SAMPLE_RATE,
+                    };
+
+                    if sender.send(frame) {
+                        silence_chunks += 1;
+                    } else {
+                        dropped_chunks += 1;
+                    }
+                }
+            }
         }
 
         let desired_volume = control.volume();
@@ -294,6 +355,8 @@ pub async fn run_live_stream(
                     elapsed_secs: started.elapsed().as_secs_f64(),
                     captured_chunks,
                     silence_chunks,
+                    late_polls,
+                    silence_transitions,
                     dropped_chunks,
                     packets_sent: stats.packets_sent,
                     retransmit_requested: stats.rtx_requested,
@@ -316,7 +379,80 @@ pub async fn run_live_stream(
         target_names,
         captured_chunks,
         silence_chunks,
+        late_polls,
+        silence_transitions,
         dropped_chunks,
         elapsed: started.elapsed(),
     })
+}
+
+
+fn fade_in_from_zero(samples: &mut [i16], channels: usize, transition_frames: usize) {
+    if channels == 0 {
+        return;
+    }
+    let frames = (samples.len() / channels).min(transition_frames).max(1);
+    for frame in 0..frames {
+        let gain = frame as f32 / frames as f32;
+        for ch in 0..channels {
+            let idx = frame * channels + ch;
+            samples[idx] = (samples[idx] as f32 * gain).round() as i16;
+        }
+    }
+}
+
+fn remember_last_samples(samples: &[i16], channels: usize, out: &mut [i16]) {
+    if channels == 0 || samples.len() < channels {
+        return;
+    }
+    let start = samples.len() - channels;
+    for ch in 0..channels.min(out.len()) {
+        out[ch] = samples[start + ch];
+    }
+}
+
+fn ramp_to_zero(
+    last_samples: &[i16],
+    channels: usize,
+    chunk_frames: usize,
+    transition_frames: usize,
+) -> Vec<i16> {
+    let mut out = vec![0i16; chunk_frames * channels];
+    if channels == 0 {
+        return out;
+    }
+
+    let frames = chunk_frames.min(transition_frames).max(1);
+    for frame in 0..frames {
+        let gain = 1.0 - (frame as f32 / frames as f32);
+        for ch in 0..channels {
+            let source = *last_samples.get(ch).unwrap_or(&0);
+            out[frame * channels + ch] = (source as f32 * gain).round() as i16;
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod clickless_tests {
+    use super::*;
+
+    #[test]
+    fn fade_in_starts_near_zero_and_reaches_signal() {
+        let mut samples = vec![10_000i16; 352 * 2];
+        fade_in_from_zero(&mut samples, 2, 96);
+        assert_eq!(samples[0], 0);
+        assert!(samples[95 * 2] > 9_000);
+        assert_eq!(samples[200 * 2], 10_000);
+    }
+
+    #[test]
+    fn ramp_to_zero_preserves_channel_shape_without_hard_step() {
+        let samples = ramp_to_zero(&[12_000, -8_000], 2, 352, 96);
+        assert_eq!(samples[0], 12_000);
+        assert_eq!(samples[1], -8_000);
+        assert!(samples[95 * 2].abs() < 500);
+        assert_eq!(samples[120 * 2], 0);
+        assert_eq!(samples[120 * 2 + 1], 0);
+    }
 }
