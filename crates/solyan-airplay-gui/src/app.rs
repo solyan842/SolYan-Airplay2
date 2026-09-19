@@ -980,8 +980,14 @@ impl SolYanAirPlayApp {
     fn draw_controls_card(&mut self, ui: &mut egui::Ui) {
         theme::card().show(ui, |ui| {
             ui.label(RichText::new(self.tr("Playback", "Điều khiển")).size(17.0).strong().color(theme::TEXT));
-            ui.add_space(8.0);
-
+            ui.label(
+                RichText::new(self.tr(
+                    "Adjust volume and latency. Use 200 ms for faster response; increase to 350–500 ms for more stability.",
+                    "Điều chỉnh âm lượng và độ trễ. 200 ms cho phản hồi nhanh; tăng 350–500 ms nếu cần ổn định hơn.",
+                ))
+                .size(10.5)
+                .color(theme::MUTED),
+            );
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.label(RichText::new(self.tr("Volume", "Âm lượng")).color(theme::MUTED));
