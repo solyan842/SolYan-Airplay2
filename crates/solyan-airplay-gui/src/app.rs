@@ -2,6 +2,7 @@ use crate::{theme, worker};
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
 use eframe::egui::{self, Align, Color32, Layout, RichText, Sense, Stroke};
 use serde::{Deserialize, Serialize};
+use solyan_airplay_core::device_profile::DeviceKind;
 use solyan_airplay_core::discovery::AirPlayReceiver;
 use solyan_airplay_core::live::{LiveStreamMode, StreamControl, StreamProgress};
 use std::collections::VecDeque;
@@ -100,7 +101,7 @@ impl SolYanAirPlayApp {
             progress: None,
         };
 
-        app.log("SolYan AirPlay2 v0.1.3 GUI initialized.");
+        app.log("SolYan AirPlay2 v0.1.4 GUI initialized.");
         app.start_scan(cc.egui_ctx.clone());
         app
     }
@@ -253,6 +254,8 @@ impl SolYanAirPlayApp {
                 match result {
                     Ok(devices) => {
                         self.log(format!("Discovery complete: {} receiver(s).", devices.len()));
+                        let mut devices = devices;
+                        devices.sort_by_key(|device| device_sort_rank(device.device_kind()));
                         self.devices = devices;
 
                         self.selected_ids
@@ -275,7 +278,22 @@ impl SolYanAirPlayApp {
                         self.status = if self.devices.is_empty() {
                             "No AirPlay receiver found on this network.".into()
                         } else {
-                            format!("{} AirPlay receiver(s) available.", self.devices.len())
+                            let homepods = self
+                                .devices
+                                .iter()
+                                .filter(|device| device.device_kind().is_homepod())
+                                .count();
+                            let apple_tvs = self
+                                .devices
+                                .iter()
+                                .filter(|device| device.device_kind().is_apple_tv())
+                                .count();
+                            format!(
+                                "{} AirPlay device(s) — {} HomePod, {} Apple TV.",
+                                self.devices.len(),
+                                homepods,
+                                apple_tvs
+                            )
                         };
                     }
                     Err(error) => {
@@ -337,9 +355,10 @@ impl SolYanAirPlayApp {
                             info.elapsed.as_secs_f64()
                         );
                         self.log(format!(
-                            "Stream closed: targets={}, captured={}, dropped={}.",
+                            "Stream closed: targets={}, captured={}, silence={}, dropped={}.",
                             info.target_names.join(", "),
                             info.captured_chunks,
+                            info.silence_chunks,
                             info.dropped_chunks
                         ));
                     }
@@ -363,7 +382,7 @@ impl SolYanAirPlayApp {
                         .color(theme::TEXT),
                 );
                 ui.label(
-                    RichText::new("Native Windows sender for HomePod")
+                    RichText::new("Native Windows AirPlay 2 sender for HomePod & Apple TV")
                         .size(13.0)
                         .color(theme::MUTED),
                 );
@@ -403,7 +422,7 @@ impl SolYanAirPlayApp {
 
     fn draw_sidebar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("SPEAKERS").size(12.0).strong().color(theme::MUTED));
+            ui.label(RichText::new("AIRPLAY DEVICES").size(12.0).strong().color(theme::MUTED));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let enabled = !self.activity.is_streaming();
                 if ui
@@ -441,11 +460,8 @@ impl SolYanAirPlayApp {
                         theme::SIDEBAR
                     };
                     let border = if selected { theme::ACCENT } else { theme::BORDER };
-                    let ip = device
-                        .addresses
-                        .first()
-                        .map(String::as_str)
-                        .unwrap_or("No address");
+                    let ip = device.preferred_address().unwrap_or("No address");
+                    let kind = device.device_kind();
 
                     let response = egui::Frame::new()
                         .fill(fill)
@@ -454,6 +470,8 @@ impl SolYanAirPlayApp {
                         .inner_margin(egui::Margin::same(13))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
+                                device_icon(ui, kind, selected);
+                                ui.add_space(5.0);
                                 ui.vertical(|ui| {
                                     ui.label(
                                         RichText::new(&device.name)
@@ -462,8 +480,14 @@ impl SolYanAirPlayApp {
                                             .color(theme::TEXT),
                                     );
                                     ui.label(
+                                        RichText::new(device.friendly_model_name())
+                                            .size(12.0)
+                                            .strong()
+                                            .color(if selected { theme::ACCENT } else { theme::TEXT }),
+                                    );
+                                    ui.label(
                                         RichText::new(format!("{}  •  {}", device.model, ip))
-                                            .size(11.5)
+                                            .size(10.5)
                                             .color(theme::MUTED),
                                     );
                                 });
@@ -491,12 +515,7 @@ impl SolYanAirPlayApp {
                             ui.add_space(7.0);
                             ui.horizontal_wrapped(|ui| {
                                 capability_badge(ui, "Audio", device.supports_audio, false);
-                                capability_badge(
-                                    ui,
-                                    "AP2",
-                                    device.supports_airplay2,
-                                    false,
-                                );
+                                capability_badge(ui, "AP2", device.supports_airplay2, false);
                                 capability_badge(ui, "PTP", device.supports_ptp, true);
                             });
                         })
@@ -800,7 +819,7 @@ impl SolYanAirPlayApp {
                         &mut columns[3],
                         "Captured",
                         &progress.captured_chunks.to_string(),
-                        &format!("dropped {}", progress.dropped_chunks),
+                        &format!("silence {} • dropped {}", progress.silence_chunks, progress.dropped_chunks),
                     );
                 });
             }
@@ -853,7 +872,7 @@ impl eframe::App for SolYanAirPlayApp {
             let available_height = ui.available_height();
 
             ui.allocate_ui_with_layout(
-                egui::vec2(318.0, available_height),
+                egui::vec2(382.0, available_height),
                 Layout::top_down(Align::Min),
                 |ui| {
                     theme::sidebar_card().show(ui, |ui| {
@@ -919,4 +938,83 @@ fn capability_badge(ui: &mut egui::Ui, label: &str, enabled: bool, experimental:
         .show(ui, |ui| {
             ui.label(RichText::new(label).size(9.5).strong().color(color));
         });
+}
+
+
+fn device_sort_rank(kind: DeviceKind) -> u8 {
+    match kind {
+        DeviceKind::HomePodMini => 0,
+        DeviceKind::HomePod2 => 1,
+        DeviceKind::HomePod1 => 2,
+        DeviceKind::HomePodOther => 3,
+        DeviceKind::AppleTv4K3 => 10,
+        DeviceKind::AppleTv4K2 => 11,
+        DeviceKind::AppleTv4K1 => 12,
+        DeviceKind::AppleTvHd4 => 13,
+        DeviceKind::AppleTv3 => 14,
+        DeviceKind::AppleTv2 => 15,
+        DeviceKind::AppleTvOther => 16,
+        DeviceKind::AirPlaySpeaker => 30,
+    }
+}
+
+fn device_icon(ui: &mut egui::Ui, kind: DeviceKind, selected: bool) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(48.0, 48.0), Sense::hover());
+    let painter = ui.painter_at(rect);
+    let fg = if selected { theme::ACCENT } else { theme::TEXT };
+    let soft = fg.gamma_multiply(0.16);
+    let center = rect.center();
+
+    if kind.is_homepod() {
+        let size = if matches!(kind, DeviceKind::HomePodMini) {
+            egui::vec2(31.0, 31.0)
+        } else {
+            egui::vec2(30.0, 39.0)
+        };
+        let body = egui::Rect::from_center_size(center, size);
+        painter.rect_filled(
+            body,
+            egui::CornerRadius::same(if matches!(kind, DeviceKind::HomePodMini) { 12 } else { 10 }),
+            soft,
+        );
+        painter.circle_filled(
+            egui::pos2(center.x, body.top() + 5.5),
+            3.2,
+            fg.gamma_multiply(0.75),
+        );
+        painter.text(
+            egui::pos2(center.x, center.y + 5.0),
+            egui::Align2::CENTER_CENTER,
+            kind.icon_text(),
+            egui::FontId::proportional(8.5),
+            fg,
+        );
+    } else if kind.is_apple_tv() {
+        let body = egui::Rect::from_center_size(center, egui::vec2(38.0, 25.0));
+        painter.rect_filled(body, egui::CornerRadius::same(7), soft);
+        painter.circle_filled(
+            egui::pos2(body.right() - 5.0, body.bottom() - 4.5),
+            1.5,
+            fg.gamma_multiply(0.8),
+        );
+        painter.text(
+            center,
+            egui::Align2::CENTER_CENTER,
+            kind.icon_text(),
+            egui::FontId::proportional(9.0),
+            fg,
+        );
+    } else {
+        let body = egui::Rect::from_center_size(center, egui::vec2(28.0, 38.0));
+        painter.rect_filled(body, egui::CornerRadius::same(7), soft);
+        painter.circle_filled(egui::pos2(center.x, center.y - 7.0), 4.0, fg.gamma_multiply(0.7));
+        painter.circle_filled(egui::pos2(center.x, center.y + 8.0), 7.0, fg.gamma_multiply(0.7));
+        painter.text(
+            egui::pos2(center.x, body.bottom() + 5.0),
+            egui::Align2::CENTER_CENTER,
+            kind.icon_text(),
+            egui::FontId::proportional(7.5),
+            fg,
+        );
+    }
 }
