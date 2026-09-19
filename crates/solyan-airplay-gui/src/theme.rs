@@ -18,7 +18,7 @@ pub fn apply(ctx: &egui::Context) {
     let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
     style.spacing.item_spacing = egui::vec2(10.0, 10.0);
     style.spacing.button_padding = egui::vec2(14.0, 9.0);
-    style.spacing.slider_width = 220.0;
+    style.spacing.slider_width = 360.0;
 
     let mut visuals = egui::Visuals::dark();
     visuals.panel_fill = BG;
@@ -26,7 +26,8 @@ pub fn apply(ctx: &egui::Context) {
     visuals.extreme_bg_color = SIDEBAR;
     visuals.faint_bg_color = CARD;
     visuals.selection.bg_fill = ACCENT;
-    visuals.selection.stroke = Stroke::new(1.0, ACCENT);
+    visuals.selection.stroke = Stroke::new(2.0, ACCENT);
+    visuals.slider_trailing_fill = true;
     visuals.widgets.inactive.bg_fill = CARD;
     visuals.widgets.inactive.weak_bg_fill = CARD;
     visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, BORDER);
