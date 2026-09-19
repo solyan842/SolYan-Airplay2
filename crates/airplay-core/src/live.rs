@@ -1,6 +1,6 @@
 use airplay2_audio::{LiveAudioDecoder, LivePcmFrame};
 use airplay2_client::AirPlayClient;
-use airplay2_core::Device;
+use airplay2_core::{Device, StreamConfig};
 use anyhow::{anyhow, bail, Result};
 use audio_capture::{start_default_loopback, AudioFormat as CaptureFormat};
 use crossbeam_channel::Sender;
@@ -163,7 +163,16 @@ pub async fn run_live_stream(
     const SILENCE_GRACE: Duration = Duration::from_millis(120);
     const TRANSITION_FRAMES: usize = 96;
 
-    let mut client = AirPlayClient::new()?;
+    let mut stream_config = StreamConfig::default();
+    if render_delay_ms == 0 {
+        // Video profile: ask for the HomePod-oriented low-latency window.
+        // 3087 samples ≈ 70ms at 44.1kHz, matching upstream HomePod
+        // arrivalToRenderLatency observations. Receivers may clamp/ignore this.
+        stream_config.latency_min = 3_087;
+        stream_config.latency_max = 11_025; // ≈250ms
+    }
+
+    let mut client = AirPlayClient::with_config(stream_config, None)?;
     client.set_render_delay_ms(render_delay_ms);
 
     let targets =
