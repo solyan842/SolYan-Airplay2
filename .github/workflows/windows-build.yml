@@ -5,7 +5,7 @@ on:
     branches: [main, "dev/**"]
 
 concurrency:
-  group: solyan-v028-${{ github.ref }}
+  group: solyan-v029-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -27,11 +27,11 @@ jobs:
       - name: Upload Windows application
         uses: actions/upload-artifact@v4
         with:
-          name: SolYan-AirPlay2-v0.2.8-Windows
-          path: target/release/SolYan-AirPlay2-v028.exe
+          name: SolYan-AirPlay2-v0.2.9-Windows
+          path: target/release/SolYan-AirPlay2-v029.exe
 
       - name: Upload debug CLI
         uses: actions/upload-artifact@v4
         with:
-          name: SolYan-AirPlay2-v0.2.8-Debug-Tools
+          name: SolYan-AirPlay2-v0.2.9-Debug-Tools
           path: target/release/solyan-airplay.exe
