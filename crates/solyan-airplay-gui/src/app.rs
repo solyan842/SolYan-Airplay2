@@ -151,7 +151,7 @@ impl SolYanAirPlayApp {
             startup_window_forced: false,
         };
 
-        app.log("SolYan AirPlay2 v0.2.14 GUI initialized.");
+        app.log("SolYan AirPlay2 v0.2.15 GUI initialized.");
         app.start_scan(cc.egui_ctx.clone());
         app
     }
@@ -175,7 +175,7 @@ impl SolYanAirPlayApp {
             .unwrap_or_else(|_| std::path::PathBuf::from("."));
         let desktop = base.join("Desktop");
         let dir = if desktop.is_dir() { desktop } else { base };
-        let path = dir.join("SolYan-AirPlay2-v0.2.14-log.txt");
+        let path = dir.join("SolYan-AirPlay2-v0.2.15-log.txt");
         match std::fs::write(&path, body) {
             Ok(()) => {
                 self.status = if self.prefs.vietnamese {
@@ -1304,7 +1304,7 @@ impl SolYanAirPlayApp {
                             .color(theme::ACCENT),
                     );
                     ui.label(
-                        RichText::new("· SolYan AirPlay2 v0.2.14")
+                        RichText::new("· SolYan AirPlay2 v0.2.15")
                             .size(11.5)
                             .strong()
                             .color(theme::text()),
@@ -1341,20 +1341,31 @@ impl eframe::App for SolYanAirPlayApp {
         if let Some(rx) = self.progress_rx.clone() {
             while let Ok(progress) = rx.try_recv() {
                 if self.activity == Activity::PreparingStream
-                    && progress.captured_chunks > 0
+                    && progress.signal_confirmed
+                    && progress.signal_chunks > 0
                     && progress.packets_sent > 0
                 {
                     self.activity = Activity::Streaming;
                     self.status = self.tr(
-                        "AirPlay ready — audio capture and packet flow verified.",
-                        "AirPlay đã sẵn sàng — đã xác nhận thu âm và luồng packet.",
+                        "AirPlay ready — non-silent PCM cleared the startup buffer.",
+                        "AirPlay đã sẵn sàng — PCM có tín hiệu đã đi qua bộ đệm khởi động.",
                     ).into();
                     self.log(format!(
-                        "STREAM READY: captured_chunks={}, packets_sent={}, targets={}.",
+                        "STREAM READY: signal_chunks={}, peak={}, captured_chunks={}, packets_sent={}, targets={}.",
+                        progress.signal_chunks,
+                        progress.signal_peak,
                         progress.captured_chunks,
                         progress.packets_sent,
                         progress.target_count
                     ));
+                } else if self.activity == Activity::PreparingStream
+                    && progress.packets_sent > 0
+                    && !progress.signal_confirmed
+                {
+                    self.status = self.tr(
+                        "AirPlay session armed — waiting for real audio to clear the startup buffer...",
+                        "AirPlay đã được kích hoạt — đang chờ âm thanh thật đi qua bộ đệm khởi động...",
+                    ).into();
                 }
                 self.progress = Some(progress);
             }

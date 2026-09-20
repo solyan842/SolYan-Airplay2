@@ -262,22 +262,6 @@ pub async fn run_live_stream(
     match mode {
         LiveStreamMode::Single => {
             client.start_live_streaming_with_decoder(decoder).await?;
-
-            // Upstream single-device live startup sends FLUSH immediately before
-            // starting the streamer but does not re-issue RECORD afterwards.
-            // Some Apple receivers tolerate that stale state and some do not,
-            // producing the observed "connected/packets sent but silent" startup.
-            // Re-arm deterministically through the public pause/resume path:
-            // pause => FLUSH + marker reset, resume => RECORD.
-            tokio::time::timeout(Duration::from_secs(5), async {
-                client.pause().await?;
-                client.resume().await?;
-                Ok::<(), anyhow::Error>(())
-            })
-            .await
-            .map_err(|_| anyhow!("AirPlay FLUSH/RECORD re-arm timed out"))??;
-
-            tracing::info!("Single-device AirPlay stream re-armed with FLUSH -> RECORD");
         }
         LiveStreamMode::MultiroomExperimental => {
             // Group startup already performs FLUSH -> RECORD for every member.
@@ -404,6 +388,9 @@ pub async fn run_live_stream(
                         signal_chunks += 1;
                         signal_peak = signal_peak.max(chunk_peak);
                         if first_signal_packet_baseline.is_none() {
+                            if let Ok(guard) = client.try_lock() {
+                                packets_sent = guard.stats_snapshot().packets_sent;
+                            }
                             first_signal_packet_baseline = Some(packets_sent);
                             tracing::info!(
                                 "First non-silent PCM queued: peak={}, packet_baseline={}",
