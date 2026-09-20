@@ -1865,148 +1865,487 @@ pub async fn run_ptp_group_master_flow(
     }
 }
 
-/// Persistent caller-owned PTP grandmaster for native AirPlay 2.
+/// Bind one AirPlay gPTP socket and join the standard multicast group.
 ///
-/// The caller supplies the exact 64-bit clock identity that was advertised
-/// in timingPeerInfo/timingPeerList. UDP 319/320 are mandatory; no ephemeral
-/// fallback is allowed because advertising one clock/port while transmitting
-/// from another produces sessions that look healthy but render silence.
+/// Native AirPlay 2 normally uses unicast timing after SETPEERS, but joining
+/// 224.0.1.129 is still required to observe receivers that announce/probe
+/// before unicast negotiation finishes.
+async fn bind_airplay_ptp_socket(port: u16) -> Result<tokio::net::UdpSocket> {
+    let socket = tokio::net::UdpSocket::bind(("0.0.0.0", port)).await
+        .map_err(|e| airplay_core::error::Error::Connection(
+            std::io::Error::new(
+                e.kind(),
+                format!("AirPlay gPTP cannot bind UDP {}: {}", port, e),
+            )
+        ))?;
+
+    let mcast = std::net::Ipv4Addr::new(224, 0, 1, 129);
+    let any = std::net::Ipv4Addr::UNSPECIFIED;
+    if let Err(err) = socket.join_multicast_v4(mcast, any) {
+        tracing::warn!("AirPlay gPTP multicast join on UDP {} failed: {}", port, err);
+    }
+    let _ = socket.set_multicast_ttl_v4(1);
+    let _ = socket.set_multicast_loop_v4(false);
+    Ok(socket)
+}
+
+async fn airplay_send_sync_pair(
+    event_socket: &tokio::net::UdpSocket,
+    general_socket: &tokio::net::UdpSocket,
+    peer: std::net::IpAddr,
+    clock_identity: &[u8; 8],
+    sequence_id: &mut u16,
+) -> Result<()> {
+    let seq = *sequence_id;
+    *sequence_id = sequence_id.wrapping_add(1);
+    let source = airplay_source_port_identity(clock_identity);
+
+    let mut sync_header = PtpHeader::new(PtpMessageType::Sync, seq);
+    sync_header.message_length = 44;
+    sync_header.flags = PTP_FLAG_UNICAST | PTP_FLAG_PTP_TIMESCALE | PTP_FLAG_TWO_STEP;
+    sync_header.source_port_identity = source;
+    sync_header.control_field = 0;
+    sync_header.log_message_interval = AIRPLAY_SYNC_LOG_INTERVAL;
+
+    let mut sync = [0u8; 44];
+    sync[..34].copy_from_slice(&sync_header.serialize());
+    event_socket
+        .send_to(&sync, std::net::SocketAddr::new(peer, PTP_EVENT_PORT))
+        .await?;
+    let egress = PtpTimestamp::now();
+
+    // iOS-shaped Follow_Up:
+    // timestamp + 802.1AS Follow_Up Information TLV + Apple clock-id TLV.
+    let mut follow_header = PtpHeader::new(PtpMessageType::FollowUp, seq);
+    follow_header.message_length = 96;
+    follow_header.flags = PTP_FLAG_UNICAST | PTP_FLAG_PTP_TIMESCALE;
+    follow_header.source_port_identity = source;
+    follow_header.control_field = 0;
+    follow_header.log_message_interval = AIRPLAY_SYNC_LOG_INTERVAL;
+
+    let mut follow = [0u8; 96];
+    follow[..34].copy_from_slice(&follow_header.serialize());
+    follow[34..44].copy_from_slice(&egress.serialize());
+
+    // Organization Extension TLV, len 28, OUI 00:80:C2, subtype 1.
+    follow[44..46].copy_from_slice(&0x0003u16.to_be_bytes());
+    follow[46..48].copy_from_slice(&28u16.to_be_bytes());
+    follow[48..51].copy_from_slice(&[0x00, 0x80, 0xC2]);
+    follow[51..54].copy_from_slice(&[0x00, 0x00, 0x01]);
+
+    // Apple Organization Extension TLV, len 16, subtype 4 + ClockID.
+    let apple = 76;
+    follow[apple..apple + 2].copy_from_slice(&0x0003u16.to_be_bytes());
+    follow[apple + 2..apple + 4].copy_from_slice(&16u16.to_be_bytes());
+    follow[apple + 4..apple + 7].copy_from_slice(&[0x00, 0x0D, 0x93]);
+    follow[apple + 7..apple + 10].copy_from_slice(&[0x00, 0x00, 0x04]);
+    follow[apple + 10..apple + 18].copy_from_slice(clock_identity);
+
+    general_socket
+        .send_to(&follow, std::net::SocketAddr::new(peer, PTP_GENERAL_PORT))
+        .await?;
+    Ok(())
+}
+
+async fn airplay_send_announce(
+    general_socket: &tokio::net::UdpSocket,
+    peer: std::net::IpAddr,
+    clock_identity: &[u8; 8],
+    sequence_id: &mut u16,
+) -> Result<()> {
+    let seq = *sequence_id;
+    *sequence_id = sequence_id.wrapping_add(1);
+
+    let mut header = PtpHeader::new(PtpMessageType::Announce, seq);
+    header.message_length = 76;
+    header.flags = PTP_FLAG_UNICAST | PTP_FLAG_PTP_TIMESCALE;
+    header.source_port_identity = airplay_source_port_identity(clock_identity);
+    header.control_field = 0;
+    header.log_message_interval = AIRPLAY_ANNOUNCE_LOG_INTERVAL;
+
+    let mut packet = [0u8; 76];
+    packet[..34].copy_from_slice(&header.serialize());
+    // originTimestamp [34..44] and currentUtcOffset [44..46] stay zero.
+    packet[47] = AIRPLAY_PRIORITY1;
+    packet[48] = AIRPLAY_CLOCK_CLASS;
+    packet[49] = AIRPLAY_CLOCK_ACCURACY;
+    packet[50..52].copy_from_slice(&AIRPLAY_LOG_VARIANCE.to_be_bytes());
+    packet[52] = AIRPLAY_PRIORITY2;
+    packet[53..61].copy_from_slice(clock_identity);
+    // stepsRemoved [61..63] = 0.
+    packet[63] = AIRPLAY_TIME_SOURCE;
+
+    // PATH_TRACE TLV expected by the gPTP profile.
+    packet[64..66].copy_from_slice(&0x0008u16.to_be_bytes());
+    packet[66..68].copy_from_slice(&8u16.to_be_bytes());
+    packet[68..76].copy_from_slice(clock_identity);
+
+    general_socket
+        .send_to(&packet, std::net::SocketAddr::new(peer, PTP_GENERAL_PORT))
+        .await?;
+    Ok(())
+}
+
+async fn airplay_send_periodic_signaling(
+    general_socket: &tokio::net::UdpSocket,
+    peer: std::net::IpAddr,
+    clock_identity: &[u8; 8],
+    sequence_id: &mut u16,
+) -> Result<()> {
+    let seq = *sequence_id;
+    *sequence_id = sequence_id.wrapping_add(1);
+
+    let mut header = PtpHeader::new(PtpMessageType::Signaling, seq);
+    header.message_length = 106;
+    header.flags = PTP_FLAG_UNICAST | PTP_FLAG_PTP_TIMESCALE;
+    header.source_port_identity = airplay_source_port_identity(clock_identity);
+    header.control_field = 5;
+    header.log_message_interval = -128;
+
+    let mut packet = [0u8; 106];
+    packet[..34].copy_from_slice(&header.serialize());
+    // [34..44] targetPortIdentity stays all zero (wildcard), as observed on iOS.
+
+    let first = 44;
+    packet[first..first + 2].copy_from_slice(&0x0003u16.to_be_bytes());
+    packet[first + 2..first + 4].copy_from_slice(&22u16.to_be_bytes());
+    packet[first + 4..first + 7].copy_from_slice(&[0x00, 0x0D, 0x93]);
+    packet[first + 7..first + 10].copy_from_slice(&[0x00, 0x00, 0x01]);
+    packet[first + 10..first + 14].copy_from_slice(&[0x00, 0x00, 0x03, 0x01]);
+
+    let second = first + 26;
+    packet[second..second + 2].copy_from_slice(&0x0003u16.to_be_bytes());
+    packet[second + 2..second + 4].copy_from_slice(&32u16.to_be_bytes());
+    packet[second + 4..second + 7].copy_from_slice(&[0x00, 0x0D, 0x93]);
+    packet[second + 7..second + 10].copy_from_slice(&[0x00, 0x00, 0x05]);
+    packet[second + 10..second + 14].copy_from_slice(&[0x00, 0x00, 0x03, 0x01]);
+
+    general_socket
+        .send_to(&packet, std::net::SocketAddr::new(peer, PTP_GENERAL_PORT))
+        .await?;
+    Ok(())
+}
+
+async fn airplay_send_delay_resp(
+    general_socket: &tokio::net::UdpSocket,
+    requester: std::net::SocketAddr,
+    request: &[u8],
+    clock_identity: &[u8; 8],
+    rx_time: PtpTimestamp,
+) -> Result<()> {
+    if request.len() < 44 {
+        return Ok(());
+    }
+    let seq = u16::from_be_bytes([request[30], request[31]]);
+    let mut header = PtpHeader::new(PtpMessageType::DelayResp, seq);
+    header.message_length = 54;
+    header.flags = PTP_FLAG_UNICAST | PTP_FLAG_PTP_TIMESCALE | PTP_FLAG_TWO_STEP;
+    header.source_port_identity = airplay_source_port_identity(clock_identity);
+    header.control_field = 0;
+    header.log_message_interval = AIRPLAY_SYNC_LOG_INTERVAL;
+
+    let mut packet = [0u8; 54];
+    packet[..34].copy_from_slice(&header.serialize());
+    packet[34..44].copy_from_slice(&rx_time.serialize());
+    packet[44..54].copy_from_slice(&request[20..30]);
+
+    general_socket
+        .send_to(
+            &packet,
+            std::net::SocketAddr::new(requester.ip(), PTP_GENERAL_PORT),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn airplay_send_pdelay_resp(
+    event_socket: &tokio::net::UdpSocket,
+    general_socket: &tokio::net::UdpSocket,
+    requester: std::net::SocketAddr,
+    request: &[u8],
+    clock_identity: &[u8; 8],
+    rx_time: PtpTimestamp,
+) -> Result<()> {
+    if request.len() < 44 {
+        return Ok(());
+    }
+    let seq = u16::from_be_bytes([request[30], request[31]]);
+    let source = airplay_source_port_identity(clock_identity);
+
+    let mut resp_header = PtpHeader::new(PtpMessageType::PdelayResp, seq);
+    resp_header.message_length = 54;
+    resp_header.flags = PTP_FLAG_UNICAST | PTP_FLAG_PTP_TIMESCALE | PTP_FLAG_TWO_STEP;
+    resp_header.source_port_identity = source;
+    resp_header.control_field = 0;
+    resp_header.log_message_interval = AIRPLAY_SYNC_LOG_INTERVAL;
+
+    let mut resp = [0u8; 54];
+    resp[..34].copy_from_slice(&resp_header.serialize());
+    resp[34..44].copy_from_slice(&rx_time.serialize());
+    resp[44..54].copy_from_slice(&request[20..30]);
+    event_socket
+        .send_to(
+            &resp,
+            std::net::SocketAddr::new(requester.ip(), PTP_EVENT_PORT),
+        )
+        .await?;
+
+    let mut follow_header = PtpHeader::new(PtpMessageType::PdelayRespFollowUp, seq);
+    follow_header.message_length = 54;
+    follow_header.flags = PTP_FLAG_UNICAST | PTP_FLAG_PTP_TIMESCALE;
+    follow_header.source_port_identity = source;
+    follow_header.control_field = 0;
+    follow_header.log_message_interval = AIRPLAY_SYNC_LOG_INTERVAL;
+
+    let mut follow = [0u8; 54];
+    follow[..34].copy_from_slice(&follow_header.serialize());
+    follow[34..44].copy_from_slice(&PtpTimestamp::now().serialize());
+    follow[44..54].copy_from_slice(&request[20..30]);
+    general_socket
+        .send_to(
+            &follow,
+            std::net::SocketAddr::new(requester.ip(), PTP_GENERAL_PORT),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn airplay_handle_unicast_request(
+    general_socket: &tokio::net::UdpSocket,
+    requester: std::net::SocketAddr,
+    request: &[u8],
+    clock_identity: &[u8; 8],
+) -> Result<usize> {
+    if request.len() < 48 {
+        return Ok(0);
+    }
+    let mut off = 44usize;
+    let mut grants: Vec<[u8; 12]> = Vec::new();
+
+    while off + 4 <= request.len() && grants.len() < 8 {
+        let tlv_type = u16::from_be_bytes([request[off], request[off + 1]]);
+        let tlv_len = u16::from_be_bytes([request[off + 2], request[off + 3]]) as usize;
+        if off + 4 + tlv_len > request.len() {
+            break;
+        }
+
+        if tlv_type == 0x0004 && tlv_len >= 6 {
+            let val = &request[off + 4..off + 4 + tlv_len];
+            let requested_type = val[0] >> 4;
+            let log_period = val[1];
+            let mut duration = u32::from_be_bytes([val[2], val[3], val[4], val[5]]);
+            if duration == 0 {
+                duration = 300;
+            }
+
+            let mut grant = [0u8; 12];
+            grant[0..2].copy_from_slice(&0x0005u16.to_be_bytes());
+            grant[2..4].copy_from_slice(&8u16.to_be_bytes());
+            grant[4] = requested_type << 4;
+            grant[5] = log_period;
+            grant[6..10].copy_from_slice(&duration.to_be_bytes());
+            grant[10] = 0;
+            grant[11] = 1; // renewal invited
+            grants.push(grant);
+        }
+        off += 4 + tlv_len;
+    }
+
+    if grants.is_empty() {
+        return Ok(0);
+    }
+
+    let seq = u16::from_be_bytes([request[30], request[31]]);
+    let mut header = PtpHeader::new(PtpMessageType::Signaling, seq);
+    header.message_length = (44 + grants.len() * 12) as u16;
+    header.flags = PTP_FLAG_UNICAST;
+    header.source_port_identity = airplay_source_port_identity(clock_identity);
+    header.control_field = 5;
+    header.log_message_interval = 0x7f;
+
+    let mut reply = Vec::with_capacity(header.message_length as usize);
+    reply.extend_from_slice(&header.serialize());
+    reply.extend_from_slice(&request[20..30]); // target requester port identity
+    for grant in &grants {
+        reply.extend_from_slice(grant);
+    }
+
+    general_socket
+        .send_to(
+            &reply,
+            std::net::SocketAddr::new(requester.ip(), PTP_GENERAL_PORT),
+        )
+        .await?;
+    Ok(grants.len())
+}
+
+/// Persistent sender-owned gPTP clock for native AirPlay 2.
+///
+/// The packet shape mirrors current Apple sender observations used by
+/// Music Assistant/OwnTone: majorSdoId=1, iOS grandmaster dataset, 8Hz
+/// two-step Sync, 1Hz Announce + Signaling, unicast grants and E2E/P2P delay
+/// responses. No BMCA yield is performed on this path.
 pub async fn run_ptp_hold_master_flow(
     peer_ips: Vec<std::net::IpAddr>,
-    priority1: u8,
+    _legacy_priority1: u8,
     clock_identity: [u8; 8],
     ready_tx: tokio::sync::oneshot::Sender<([u8; 8], u16, u16)>,
 ) -> Result<()> {
-    use tokio::net::UdpSocket;
-
-    let event_socket = UdpSocket::bind(("0.0.0.0", PTP_EVENT_PORT)).await
-        .map_err(|e| airplay_core::error::Error::Connection(
-            std::io::Error::new(
-                e.kind(),
-                format!("PTP hold-master cannot bind UDP {}: {}", PTP_EVENT_PORT, e),
-            )
-        ))?;
-    let general_socket = UdpSocket::bind(("0.0.0.0", PTP_GENERAL_PORT)).await
-        .map_err(|e| airplay_core::error::Error::Connection(
-            std::io::Error::new(
-                e.kind(),
-                format!("PTP hold-master cannot bind UDP {}: {}", PTP_GENERAL_PORT, e),
-            )
-        ))?;
-
+    let event_socket = bind_airplay_ptp_socket(PTP_EVENT_PORT).await?;
+    let general_socket = bind_airplay_ptp_socket(PTP_GENERAL_PORT).await?;
     let event_port = event_socket.local_addr()?.port();
     let general_port = general_socket.local_addr()?.port();
+
     tracing::info!(
-        "PTP hold-master bound UDP {}/{} clock_id={:02x?} peers={}",
-        event_port, general_port, clock_identity, peer_ips.len()
+        "AirPlay gPTP grandmaster ready: UDP {}/{}, clock_id={:02x?}, peers={}",
+        event_port,
+        general_port,
+        clock_identity,
+        peer_ips.len()
     );
     let _ = ready_tx.send((clock_identity, event_port, general_port));
 
-    let event_dests: Vec<std::net::SocketAddr> = peer_ips.iter()
-        .map(|ip| std::net::SocketAddr::new(*ip, PTP_EVENT_PORT))
-        .collect();
-    let general_dests: Vec<std::net::SocketAddr> = peer_ips.iter()
-        .map(|ip| std::net::SocketAddr::new(*ip, PTP_GENERAL_PORT))
-        .collect();
+    let mut sync_seq = 0u16;
+    let mut announce_seq = 0u16;
+    let mut signaling_seq = 0u16;
+    let mut tick_count = 0u64;
+    let mut event_buf = [0u8; 512];
+    let mut general_buf = [0u8; 512];
 
-    let mut sync_seq: u16 = 0;
-    let mut announce_seq: u16 = 0;
-    let mut signaling_seq: u16 = 0;
-
-    for peer_idx in 0..peer_ips.len() {
-        let event_dest = event_dests[peer_idx];
-        let general_dest = general_dests[peer_idx];
-        for i in 0..3 {
-            send_ptp_sync(
-                &event_socket, &general_socket, event_dest,
-                &clock_identity, &mut sync_seq
-            ).await?;
-            if i < 2 {
-                send_ptp_announce(
-                    &general_socket, general_dest, &clock_identity,
-                    &mut announce_seq, 248, priority1
-                ).await?;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(125)).await;
-        }
-        send_mac_style_signaling(
-            &general_socket, general_dest, &clock_identity, &mut signaling_seq
-        ).await?;
+    // Immediate kick so a receiver can start measuring our clock while RTSP
+    // Session SETUP is being built.
+    for &peer in &peer_ips {
+        airplay_send_announce(&general_socket, peer, &clock_identity, &mut announce_seq).await?;
+        airplay_send_periodic_signaling(
+            &general_socket,
+            peer,
+            &clock_identity,
+            &mut signaling_seq,
+        )
+        .await?;
+        airplay_send_sync_pair(
+            &event_socket,
+            &general_socket,
+            peer,
+            &clock_identity,
+            &mut sync_seq,
+        )
+        .await?;
     }
 
-    tracing::info!(
-        "PTP hold-master entering persistent 8Hz loop (priority1={})",
-        priority1
-    );
-
-    let sync_interval = std::time::Duration::from_millis(125);
-    let mut announce_counter: u32 = 0;
-    let mut event_buf = [0u8; 256];
-    let mut general_buf = [0u8; 256];
+    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(125));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ticker.tick().await;
 
     loop {
-        for &event_dest in &event_dests {
-            if let Err(e) = send_ptp_sync(
-                &event_socket, &general_socket, event_dest,
-                &clock_identity, &mut sync_seq
-            ).await {
-                tracing::warn!("PTP hold-master Sync failed to {}: {}", event_dest, e);
-            }
-        }
+        tokio::select! {
+            _ = ticker.tick() => {
+                tick_count = tick_count.wrapping_add(1);
+                for &peer in &peer_ips {
+                    if let Err(err) = airplay_send_sync_pair(
+                        &event_socket,
+                        &general_socket,
+                        peer,
+                        &clock_identity,
+                        &mut sync_seq,
+                    ).await {
+                        tracing::warn!("AirPlay gPTP Sync failed to {}: {}", peer, err);
+                    }
+                }
 
-        announce_counter += 1;
-        if announce_counter >= 16 {
-            announce_counter = 0;
-            for &general_dest in &general_dests {
-                if let Err(e) = send_ptp_announce(
-                    &general_socket, general_dest, &clock_identity,
-                    &mut announce_seq, 248, priority1
-                ).await {
-                    tracing::warn!("PTP hold-master Announce failed to {}: {}", general_dest, e);
+                if tick_count % 8 == 0 {
+                    for &peer in &peer_ips {
+                        if let Err(err) = airplay_send_announce(
+                            &general_socket,
+                            peer,
+                            &clock_identity,
+                            &mut announce_seq,
+                        ).await {
+                            tracing::warn!("AirPlay gPTP Announce failed to {}: {}", peer, err);
+                        }
+                        if let Err(err) = airplay_send_periodic_signaling(
+                            &general_socket,
+                            peer,
+                            &clock_identity,
+                            &mut signaling_seq,
+                        ).await {
+                            tracing::warn!("AirPlay gPTP Signaling failed to {}: {}", peer, err);
+                        }
+                    }
                 }
             }
-        }
 
-        let deadline = tokio::time::Instant::now() + sync_interval;
-        loop {
-            tokio::select! {
-                _ = tokio::time::sleep_until(deadline) => break,
-                result = event_socket.recv_from(&mut event_buf) => {
-                    if let Ok((len, src)) = result {
+            result = event_socket.recv_from(&mut event_buf) => {
+                if let Ok((len, src)) = result {
+                    if len >= 34 {
                         if let Ok(header) = PtpHeader::parse(&event_buf[..len]) {
-                            if header.message_type == PtpMessageType::DelayReq {
-                                let recv_time = PtpTimestamp::now();
-                                let mut source_port_identity = [0u8; 10];
-                                source_port_identity[..8].copy_from_slice(&clock_identity);
-                                source_port_identity[8..10].copy_from_slice(&1u16.to_be_bytes());
-
-                                let mut resp_header =
-                                    PtpHeader::new(PtpMessageType::DelayResp, header.sequence_id);
-                                resp_header.source_port_identity = source_port_identity;
-                                resp_header.message_length = 54;
-
-                                let mut resp_packet = [0u8; 54];
-                                resp_packet[..34].copy_from_slice(&resp_header.serialize());
-                                resp_packet[34..44].copy_from_slice(&recv_time.serialize());
-                                resp_packet[44..54].copy_from_slice(&header.source_port_identity);
-
-                                if let Err(e) = event_socket.send_to(&resp_packet, src).await {
-                                    tracing::warn!(
-                                        "PTP hold-master Delay_Resp failed to {}: {}",
-                                        src, e
+                            match header.message_type {
+                                PtpMessageType::DelayReq => {
+                                    if let Err(err) = airplay_send_delay_resp(
+                                        &general_socket,
+                                        src,
+                                        &event_buf[..len],
+                                        &clock_identity,
+                                        PtpTimestamp::now(),
+                                    ).await {
+                                        tracing::warn!("AirPlay gPTP Delay_Resp failed: {}", err);
+                                    }
+                                }
+                                PtpMessageType::PdelayReq => {
+                                    if let Err(err) = airplay_send_pdelay_resp(
+                                        &event_socket,
+                                        &general_socket,
+                                        src,
+                                        &event_buf[..len],
+                                        &clock_identity,
+                                        PtpTimestamp::now(),
+                                    ).await {
+                                        tracing::warn!("AirPlay gPTP Pdelay response failed: {}", err);
+                                    }
+                                }
+                                _ => {
+                                    tracing::trace!(
+                                        "AirPlay gPTP event {:?} from {}",
+                                        header.message_type,
+                                        src
                                     );
                                 }
                             }
                         }
                     }
                 }
-                result = general_socket.recv_from(&mut general_buf) => {
-                    if let Ok((len, src)) = result {
+            }
+
+            result = general_socket.recv_from(&mut general_buf) => {
+                if let Ok((len, src)) = result {
+                    if len >= 34 {
                         if let Ok(header) = PtpHeader::parse(&general_buf[..len]) {
-                            tracing::trace!(
-                                "PTP hold-master received {:?} from {}",
-                                header.message_type, src
-                            );
+                            if header.message_type == PtpMessageType::Signaling {
+                                match airplay_handle_unicast_request(
+                                    &general_socket,
+                                    src,
+                                    &general_buf[..len],
+                                    &clock_identity,
+                                ).await {
+                                    Ok(count) if count > 0 => tracing::info!(
+                                        "AirPlay gPTP granted {} unicast request(s) to {}",
+                                        count,
+                                        src.ip()
+                                    ),
+                                    Ok(_) => {},
+                                    Err(err) => tracing::warn!(
+                                        "AirPlay gPTP unicast grant failed for {}: {}",
+                                        src.ip(),
+                                        err
+                                    ),
+                                }
+                            } else {
+                                tracing::trace!(
+                                    "AirPlay gPTP general {:?} from {}",
+                                    header.message_type,
+                                    src
+                                );
+                            }
                         }
                     }
                 }
