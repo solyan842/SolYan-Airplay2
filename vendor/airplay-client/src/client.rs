@@ -419,6 +419,25 @@ impl AirPlayClient {
         Ok(())
     }
 
+    /// Arm a warm timeline re-anchor for the active single-device live stream.
+    ///
+    /// This is intentionally synchronous and lock-free once the AirPlayClient
+    /// itself is borrowed: the streamer consumes the request on its next packet.
+    pub fn request_live_timeline_reanchor(&self) -> bool {
+        self.connection
+            .as_ref()
+            .map(|connection| connection.request_live_timeline_reanchor())
+            .unwrap_or(false)
+    }
+
+    /// Number of warm timeline re-anchors already applied on the primary stream.
+    pub fn timeline_reanchors(&self) -> u64 {
+        self.connection
+            .as_ref()
+            .map(|connection| connection.timeline_reanchors())
+            .unwrap_or(0)
+    }
+
     /// Send feedback/keepalive to the receiver.
     ///
     /// **IMPORTANT:** AirPlay 2 receivers expect periodic feedback requests (~every 2 seconds)
