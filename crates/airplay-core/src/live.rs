@@ -1,8 +1,9 @@
 use airplay2_audio::{LiveAudioDecoder, LivePcmFrame};
 use airplay2_client::AirPlayClient;
 use airplay2_core::{Device, StreamConfig};
+use airplay2_core::error::Error as AirPlayError;
 use anyhow::{anyhow, bail, Result};
-use audio_capture::{start_default_loopback, AudioFormat as CaptureFormat};
+use audio_capture::{start_default_loopback, AudioFormat as CaptureFormat, CaptureHandle};
 use crossbeam_channel::Sender;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -68,6 +69,9 @@ pub struct StreamProgress {
     pub loss_percent: f64,
     pub drift_ppm: f64,
     pub target_count: usize,
+    pub capture_restarts: u64,
+    pub feedback_timeout_streak: u32,
+    pub control_degraded: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +82,7 @@ pub struct LiveStreamResult {
     pub late_polls: u64,
     pub silence_transitions: u64,
     pub dropped_chunks: u64,
+    pub capture_restarts: u64,
     pub elapsed: Duration,
 }
 
@@ -153,6 +158,81 @@ async fn discover_targets(
     }
 }
 
+fn validate_capture_format(capture: &CaptureHandle, expected_rate: Option<u32>) -> Result<()> {
+    if capture.format.channels != 2 || capture.format.bits_per_sample != 16 {
+        bail!(
+            "unexpected normalized WASAPI format: {} Hz / {} ch / {} bit",
+            capture.format.sample_rate,
+            capture.format.channels,
+            capture.format.bits_per_sample
+        );
+    }
+
+    if let Some(rate) = expected_rate {
+        if capture.format.sample_rate != rate {
+            bail!(
+                "WASAPI mix format changed during playback: {} -> {} Hz",
+                rate,
+                capture.format.sample_rate
+            );
+        }
+    }
+
+    Ok(())
+}
+
+async fn reopen_default_loopback(
+    expected_rate: u32,
+    control: &StreamControl,
+    attempts: usize,
+) -> Result<CaptureHandle> {
+    let mut last_error = None;
+
+    for attempt in 1..=attempts {
+        if control.is_stopped() {
+            bail!("capture recovery cancelled");
+        }
+
+        match start_default_loopback(CaptureFormat::default()) {
+            Ok(capture) => match validate_capture_format(&capture, Some(expected_rate)) {
+                Ok(()) => {
+                    tracing::info!(
+                        "WASAPI capture recovered on attempt {}: {} @ {} Hz",
+                        attempt,
+                        capture.device_name,
+                        capture.format.sample_rate
+                    );
+                    return Ok(capture);
+                }
+                Err(err) => {
+                    last_error = Some(err.to_string());
+                }
+            },
+            Err(err) => {
+                last_error = Some(err.to_string());
+            }
+        }
+
+        tracing::warn!(
+            "WASAPI reopen attempt {}/{} failed: {}",
+            attempt,
+            attempts,
+            last_error.as_deref().unwrap_or("unknown error")
+        );
+
+        tokio::time::sleep(Duration::from_millis(
+            250 * attempt.min(4) as u64
+        ))
+        .await;
+    }
+
+    bail!(
+        "WASAPI recovery exhausted after {} attempts: {}",
+        attempts,
+        last_error.unwrap_or_else(|| "unknown error".to_string())
+    )
+}
+
 pub async fn run_live_stream(
     selectors: Vec<String>,
     mode: LiveStreamMode,
@@ -174,7 +254,8 @@ pub async fn run_live_stream(
     // Do not fade to synthetic silence for ordinary scheduler hiccups.
     const SILENCE_GRACE: Duration = Duration::from_millis(350);
     const STARTUP_PRIME_MS: u64 = 450;
-    const FEEDBACK_MAX_CONSECUTIVE_MISSES: u32 = 3;
+    const FEEDBACK_DEGRADED_MISSES: u32 = 3;
+    const CAPTURE_RESTART_ATTEMPTS: usize = 6;
     const TRANSITION_MS: u32 = 2;
     const SIGNAL_PEAK_THRESHOLD: u16 = 32;
     const SIGNAL_CONFIRM_PACKETS: u64 = 120;
@@ -216,14 +297,9 @@ pub async fn run_live_stream(
     client.set_volume(initial_volume).await?;
 
     let mut capture = start_default_loopback(CaptureFormat::default())?;
-    if capture.format.channels != CHANNELS as u16 || capture.format.bits_per_sample != 16 {
+    if let Err(err) = validate_capture_format(&capture, None) {
         let _ = client.disconnect().await;
-        bail!(
-            "unexpected normalized WASAPI format: {} Hz / {} ch / {} bit",
-            capture.format.sample_rate,
-            capture.format.channels,
-            capture.format.bits_per_sample
-        );
+        return Err(err);
     }
 
     let source_rate = capture.format.sample_rate;
@@ -366,8 +442,12 @@ pub async fn run_live_stream(
     let feedback_client = Arc::clone(&client);
     let feedback_stop = Arc::new(AtomicBool::new(false));
     let feedback_stop_worker = Arc::clone(&feedback_stop);
-    let feedback_unhealthy = Arc::new(AtomicBool::new(false));
-    let feedback_unhealthy_worker = Arc::clone(&feedback_unhealthy);
+    let feedback_fatal = Arc::new(AtomicBool::new(false));
+    let feedback_fatal_worker = Arc::clone(&feedback_fatal);
+    let feedback_timeout_streak = Arc::new(AtomicU32::new(0));
+    let feedback_timeout_streak_worker = Arc::clone(&feedback_timeout_streak);
+    let feedback_degraded = Arc::new(AtomicBool::new(false));
+    let feedback_degraded_worker = Arc::clone(&feedback_degraded);
     let feedback_task = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(2));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -388,19 +468,40 @@ pub async fn run_live_stream(
             let elapsed = feedback_started.elapsed();
 
             match result {
-                Ok(()) => consecutive_misses = 0,
-                Err(err) => {
-                    consecutive_misses += 1;
-                    tracing::warn!(
-                        "AirPlay feedback miss {}/{}: {}",
-                        consecutive_misses,
-                        FEEDBACK_MAX_CONSECUTIVE_MISSES,
-                        err
-                    );
-                    if consecutive_misses >= FEEDBACK_MAX_CONSECUTIVE_MISSES {
-                        feedback_unhealthy_worker.store(true, Ordering::Release);
-                        break;
+                Ok(()) => {
+                    if consecutive_misses > 0 {
+                        tracing::info!(
+                            "AirPlay feedback recovered after {} timeout(s)",
+                            consecutive_misses
+                        );
                     }
+                    consecutive_misses = 0;
+                    feedback_timeout_streak_worker.store(0, Ordering::Release);
+                    feedback_degraded_worker.store(false, Ordering::Release);
+                }
+                Err(AirPlayError::Timeout) => {
+                    consecutive_misses += 1;
+                    feedback_timeout_streak_worker
+                        .store(consecutive_misses, Ordering::Release);
+
+                    if consecutive_misses >= FEEDBACK_DEGRADED_MISSES {
+                        feedback_degraded_worker.store(true, Ordering::Release);
+                        tracing::warn!(
+                            "AirPlay control keepalive degraded: {} consecutive timeouts; RTP continues",
+                            consecutive_misses
+                        );
+                    } else {
+                        tracing::warn!(
+                            "AirPlay feedback timeout {}/{}; RTP continues",
+                            consecutive_misses,
+                            FEEDBACK_DEGRADED_MISSES
+                        );
+                    }
+                }
+                Err(err) => {
+                    tracing::error!("AirPlay control channel hard failure: {err}");
+                    feedback_fatal_worker.store(true, Ordering::Release);
+                    break;
                 }
             }
 
@@ -442,14 +543,12 @@ pub async fn run_live_stream(
     let mut retransmit_fulfilled = 0u64;
     let mut underruns = 0u64;
     let mut loss_percent = 0.0f64;
+    let mut capture_restarts = 0u64;
     let mut loop_error: Option<anyhow::Error> = None;
 
     while !control.is_stopped() {
-        if feedback_unhealthy.load(Ordering::Acquire) {
-            loop_error = Some(anyhow!(
-                "AirPlay control session lost after {} consecutive feedback failures",
-                FEEDBACK_MAX_CONSECUTIVE_MISSES
-            ));
+        if feedback_fatal.load(Ordering::Acquire) {
+            loop_error = Some(anyhow!("AirPlay RTSP control channel failed"));
             break;
         }
 
@@ -457,8 +556,46 @@ pub async fn run_live_stream(
         let captured = match capture.poll_timeout(poll_window) {
             Ok(captured) => captured,
             Err(err) => {
-                loop_error = Some(err.into());
-                break;
+                if control.is_stopped() {
+                    break;
+                }
+
+                tracing::warn!(
+                    "WASAPI capture interrupted: {}. Keeping AirPlay RTP alive while reopening the default render endpoint.",
+                    err
+                );
+
+                capture.stop();
+
+                match reopen_default_loopback(
+                    source_rate,
+                    &control,
+                    CAPTURE_RESTART_ATTEMPTS,
+                )
+                .await
+                {
+                    Ok(new_capture) => {
+                        capture = new_capture;
+                        capture_restarts += 1;
+                        in_silence = true;
+                        last_real_at = None;
+                        last_samples.fill(0);
+                        next_silence_at = Instant::now() + silence_chunk_period;
+                        tracing::info!(
+                            "WASAPI recovery complete; AirPlay session preserved (restart #{})",
+                            capture_restarts
+                        );
+                        continue;
+                    }
+                    Err(recovery_error) => {
+                        loop_error = Some(anyhow!(
+                            "WASAPI capture failed and could not recover: {}; recovery: {}",
+                            err,
+                            recovery_error
+                        ));
+                        break;
+                    }
+                }
             }
         };
 
@@ -627,6 +764,9 @@ pub async fn run_live_stream(
                     loss_percent,
                     drift_ppm: 0.0,
                     target_count: targets.len(),
+                    capture_restarts,
+                    feedback_timeout_streak: feedback_timeout_streak.load(Ordering::Acquire),
+                    control_degraded: feedback_degraded.load(Ordering::Acquire),
                 });
             }
             next_progress = now + Duration::from_millis(500);
@@ -660,6 +800,7 @@ pub async fn run_live_stream(
         late_polls,
         silence_transitions,
         dropped_chunks,
+        capture_restarts,
         elapsed: started.elapsed(),
     })
 }

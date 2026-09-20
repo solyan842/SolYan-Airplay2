@@ -73,3 +73,20 @@ A candidate must pass CI and real HomePod tests:
 
 Do not merge a build to `stable/*` solely because CI passes; hardware playback
 is part of the stability gate.
+
+
+## Runtime recovery (v0.2.18)
+
+- A Windows WASAPI capture failure must not tear down a healthy AirPlay RTP
+  session immediately. The live RTP clock continues with encoded silence while
+  SolYan releases the failed capture client, re-selects the default render
+  endpoint and opens a fresh loopback capture client.
+- The recovered capture format must remain stereo i16-normalized at the same
+  native source sample rate. A mid-session mix-rate change is surfaced clearly
+  instead of silently feeding the resampler with the wrong clock rate.
+- Feedback timeouts are control-health signals, not proof that RTP is dead.
+  Three consecutive timeouts mark control as degraded but do not stop audio.
+  A non-timeout/hard RTSP failure remains terminal.
+- The GUI executable name is stable: `SolYan-AirPlay2.exe`. Version numbers
+  belong in file metadata and release artifact names, reducing repeated Windows
+  Firewall prompts caused only by versioned executable paths/names.
