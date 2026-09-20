@@ -359,21 +359,12 @@ pub async fn run_live_stream(
                     .unwrap_or(0);
 
                 if in_silence {
-                    let silent_for = silence_started_at.map(|t| t.elapsed());
                     fade_in_from_zero(
                         &mut samples,
                         chunk.channels as usize,
                         transition_frames,
                     );
                     in_silence = false;
-                    silence_started_at = None;
-                    if warm_reanchor_armed {
-                        tracing::info!(
-                            "Real PCM resumed after {:.0} ms silence; warm timeline re-anchor was armed",
-                            silent_for.unwrap_or_default().as_secs_f64() * 1000.0
-                        );
-                    }
-                    warm_reanchor_armed = false;
                     silence_transitions += 1;
                 }
 
@@ -631,12 +622,21 @@ pub async fn run_live_stream(
                     .unwrap_or(0);
 
                 if in_silence {
+                    let silent_for = silence_started_at.map(|t| t.elapsed());
                     fade_in_from_zero(
                         &mut samples,
                         chunk.channels as usize,
                         transition_frames,
                     );
                     in_silence = false;
+                    silence_started_at = None;
+                    if warm_reanchor_armed {
+                        tracing::info!(
+                            "Real PCM resumed after {:.0} ms silence; warm timeline re-anchor was armed",
+                            silent_for.unwrap_or_default().as_secs_f64() * 1000.0
+                        );
+                    }
+                    warm_reanchor_armed = false;
                     silence_transitions += 1;
                 }
 
