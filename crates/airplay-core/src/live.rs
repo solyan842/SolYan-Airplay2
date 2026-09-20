@@ -1,7 +1,7 @@
 use airplay2_audio::{LiveAudioDecoder, LivePcmFrame};
 use airplay2_client::AirPlayClient;
 use airplay2_core::{Device, StreamConfig};
-use airplay2_core::error::Error as AirPlayError;
+use airplay2_core::error::{Error as AirPlayError, RtspError as AirPlayRtspError};
 use anyhow::{anyhow, bail, Result};
 use audio_capture::{start_default_loopback, AudioFormat as CaptureFormat, CaptureHandle};
 use crossbeam_channel::Sender;
@@ -530,7 +530,8 @@ pub async fn run_live_stream(
                     feedback_timeout_streak_worker.store(0, Ordering::Release);
                     feedback_degraded_worker.store(false, Ordering::Release);
                 }
-                Err(AirPlayError::Timeout) => {
+                Err(AirPlayError::Timeout)
+                | Err(AirPlayError::Rtsp(AirPlayRtspError::UnexpectedStatus(_))) => {
                     consecutive_misses += 1;
                     feedback_timeout_streak_worker
                         .store(consecutive_misses, Ordering::Release);
@@ -538,19 +539,22 @@ pub async fn run_live_stream(
                     if consecutive_misses >= FEEDBACK_DEGRADED_MISSES {
                         feedback_degraded_worker.store(true, Ordering::Release);
                         tracing::warn!(
-                            "AirPlay control keepalive degraded: {} consecutive timeouts; RTP continues",
+                            "AirPlay feedback degraded: {} consecutive keepalive misses; RTP continues",
                             consecutive_misses
                         );
                     } else {
                         tracing::warn!(
-                            "AirPlay feedback timeout {}/{}; RTP continues",
+                            "AirPlay feedback miss {}/{}; RTP continues",
                             consecutive_misses,
                             FEEDBACK_DEGRADED_MISSES
                         );
                     }
                 }
                 Err(err) => {
-                    tracing::error!("AirPlay control channel hard failure: {err}");
+                    // Transport/framing errors mean the RTSP channel itself is
+                    // no longer trustworthy. Unlike an HTTP status miss, this
+                    // is a real control-plane failure.
+                    tracing::error!("AirPlay control channel transport failure: {err}");
                     feedback_fatal_worker.store(true, Ordering::Release);
                     break;
                 }
