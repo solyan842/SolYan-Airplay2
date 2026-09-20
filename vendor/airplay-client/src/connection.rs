@@ -829,6 +829,13 @@ impl Connection {
         tracing::info!("Control port bound to {}", actual_control_port);
         self.control_receiver = Some(Arc::new(control_receiver));
 
+        // Native AirPlay 2 startup order used by Apple-compatible senders:
+        // establish the session/events/control plane, issue RECORD on the
+        // session URL, then register the audio stream with SETUP phase 2.
+        // Do not FLUSH a brand-new session: FLUSH is for an existing timeline.
+        tracing::info!("Sending initial RECORD before audio stream SETUP");
+        self.send_record().await?;
+
         // SETUP Phase 2 (audio stream)
         let setup2_body = self.session.build_setup_phase2()?;
         let setup2_req = RtspRequest::setup(self.session.request_uri(), setup2_body);
@@ -839,32 +846,13 @@ impl Connection {
             setup2_resp.body.as_ref().map(|b| b.len()).unwrap_or(0),
             setup2_resp.body.is_some()
         );
+        if setup2_resp.status_code != 200 {
+            return Err(CoreError::Rtsp(RtspError::UnexpectedStatus(setup2_resp.status_code)));
+        }
         if let Some(ref body) = setup2_resp.body {
             tracing::debug!("SETUP phase2 response body (hex, first 100 bytes): {:02x?}", &body[..body.len().min(100)]);
         }
         self.session.process_setup_phase2_response(setup2_resp.body.as_deref().unwrap_or(&[]))?;
-
-        // RECORD — sent after both SETUP phases so the receiver has streams configured
-        tracing::debug!("Sending RECORD request");
-        let record_req = RtspRequest::record_with_info(
-            self.session.request_uri(),
-            0,  // Initial sequence number
-            0,  // Initial RTP time
-        );
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            self.rtsp.send(record_req)
-        ).await {
-            Ok(Ok(resp)) => {
-                if resp.status_code == 200 {
-                    tracing::info!("RECORD acknowledged");
-                } else {
-                    warn!("RECORD returned status {} (continuing anyway)", resp.status_code);
-                }
-            }
-            Ok(Err(e)) => warn!("RECORD error (continuing anyway): {}", e),
-            Err(_) => warn!("RECORD timeout (continuing anyway)"),
-        }
 
         // SETPEERS disabled — not needed for current receiver targets
         // let local_addr_str = self.rtsp.local_addr()
@@ -1306,14 +1294,9 @@ impl Connection {
             streamer.set_spatial_params(params, speakers).await;
         }
 
-        // Receiver state must be re-armed deterministically before the
-        // sender thread is allowed to release audio. The previous upstream
-        // order FLUSH -> start sender (without a fresh RECORD) could leave
-        // Apple receivers connected but silent.
-        self.send_flush(0, 0).await?;
-        self.send_record().await?;
-
-        // Start live streaming only after FLUSH and RECORD were acknowledged.
+        // Initial RECORD was completed during setup, before audio stream
+        // SETUP. A fresh session must not be FLUSHed here: doing so caused
+        // HomePod to return RTSP 500 and invalidated an otherwise valid start.
         streamer.start_live(live_decoder).await?;
 
         self.session.start_playing()?;
