@@ -34,6 +34,7 @@ pub struct CaptureHandle {
     pub device_name: String,
     pub format: AudioFormat,
     rx: Receiver<CapturedChunk>,
+    runtime_error_rx: Receiver<String>,
     running: Arc<AtomicBool>,
     captured_frames: Arc<AtomicU64>,
     thread: Option<thread::JoinHandle<()>>,
@@ -52,7 +53,11 @@ impl CaptureHandle {
             Ok(chunk) => Ok(Some(chunk)),
             Err(RecvTimeoutError::Timeout) => Ok(None),
             Err(RecvTimeoutError::Disconnected) => {
-                Err(anyhow!("WASAPI capture worker disconnected"))
+                let detail = self
+                    .runtime_error_rx
+                    .try_recv()
+                    .unwrap_or_else(|_| "worker exited without a detailed WASAPI error".to_string());
+                Err(anyhow!("WASAPI capture worker disconnected: {detail}"))
             }
         }
     }
@@ -177,12 +182,16 @@ fn convert_native_to_stereo_i16(
 pub fn start_default_loopback(_requested: AudioFormat) -> Result<CaptureHandle> {
     use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode, initialize_mta};
 
-    const EVENT_POLL_MS: u32 = 250;
+    // Event mode normally wakes immediately. If Windows misses or delays a
+    // loopback event, inspect the capture buffer again after 20ms instead of
+    // starving the AirPlay pipeline for a quarter of a second.
+    const EVENT_POLL_MS: u32 = 20;
     const OUTPUT_BLOCK_FRAMES: usize = 1024;
 
     // Capture must be lossless. The previous bounded queue + try_send could
     // silently drop a PCM block during a short scheduler stall, producing clicks.
     let (tx, rx) = unbounded::<CapturedChunk>();
+    let (runtime_error_tx, runtime_error_rx) = unbounded::<String>();
     let (init_tx, init_rx) =
         std::sync::mpsc::sync_channel::<Result<(String, AudioFormat), String>>(1);
     let running = Arc::new(AtomicBool::new(true));
@@ -346,6 +355,9 @@ pub fn start_default_loopback(_requested: AudioFormat) -> Result<CaptureHandle> 
             })();
 
             if let Err(error) = result {
+                // If initialization already succeeded, init_rx is gone; retain
+                // the actual runtime WASAPI failure for the live supervisor.
+                let _ = runtime_error_tx.send(error.clone());
                 let _ = init_tx.send(Err(error));
             }
         })?;
@@ -360,6 +372,7 @@ pub fn start_default_loopback(_requested: AudioFormat) -> Result<CaptureHandle> 
         device_name,
         format,
         rx,
+        runtime_error_rx,
         running,
         captured_frames,
         thread: Some(handle),

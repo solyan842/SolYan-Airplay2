@@ -93,7 +93,11 @@ pub struct LiveAudioDecoder {
     /// Timeout for receiving frames.
     recv_timeout: Duration,
     /// High-quality sinc resampler (lazily initialized when needed).
+    /// Live WASAPI can be re-opened with a different native mix rate after a
+    /// player/source/endpoint transition, so the resampler is keyed to the
+    /// actual rate carried by each LivePcmFrame instead of the startup rate.
     resampler: Option<airplay_resampler::Resampler>,
+    resampler_source_rate: Option<u32>,
     drift_ppm_x100: Arc<AtomicI32>,
     applied_drift_ppm_x100: i32,
 }
@@ -119,6 +123,7 @@ impl LiveAudioDecoder {
             residual_samples: Vec::new(),
             recv_timeout: Duration::from_millis(2), // Very short timeout to prevent blocking!
             resampler: None,
+            resampler_source_rate: None,
             drift_ppm_x100,
             applied_drift_ppm_x100: 0,
         }
@@ -219,82 +224,77 @@ impl LiveAudioDecoder {
         frames_per_packet: usize,
     ) -> Result<Option<DecodedFrame>> {
         let target_rate = target_format.sample_rate.as_hz();
-        let source_rate = self.sample_rate;
-
-        // Initialize resampler lazily if needed
-        if source_rate != target_rate && self.resampler.is_none() {
-            self.resampler = Some(airplay_resampler::Resampler::new(
-                source_rate,
-                target_rate,
-                self.channels,
-            )?);
-        }
-
-        if source_rate != target_rate {
-            let desired = self.drift_ppm_x100.load(Ordering::Relaxed);
-            if desired != self.applied_drift_ppm_x100 {
-                if let Some(resampler) = self.resampler.as_mut() {
-                    resampler.set_drift_ppm(desired as f64 / 100.0)?;
-                    self.applied_drift_ppm_x100 = desired;
-                }
-            }
-        }
-
-        // Start with any leftover samples from previous call
-        let mut collected_samples = std::mem::take(&mut self.residual_samples);
         let target_samples = frames_per_packet * target_format.channels as usize;
+        let mut collected_samples = std::mem::take(&mut self.residual_samples);
 
-        // Collect frames until we have enough samples
         while collected_samples.len() < target_samples {
-            match self.decode_frame()? {
-                Some(frame) => {
-                    if source_rate == target_rate {
-                        collected_samples.extend(frame.samples);
-                    } else {
-                        // High-quality sinc resampling
-                        let resampled = self
-                            .resampler
-                            .as_mut()
-                            .expect("resampler should be initialized")
-                            .process(&frame.samples)?;
-                        collected_samples.extend(resampled);
-                    }
-                }
+            let frame = match self.decode_frame()? {
+                Some(frame) => frame,
                 None => {
                     if collected_samples.is_empty() {
                         return Ok(None);
                     }
-                    // Not enough samples for a full packet — save partial data
-                    // back to residual instead of padding with silence (which
-                    // causes audible pops). Next call will pick these up.
                     self.residual_samples = collected_samples;
                     return Ok(None);
                 }
+            };
+
+            let frame_rate = frame.sample_rate;
+            if frame_rate != self.sample_rate {
+                tracing::info!(
+                    "Live PCM source rate changed: {} -> {} Hz; rebuilding resampler without restarting AirPlay",
+                    self.sample_rate,
+                    frame_rate
+                );
+                self.sample_rate = frame_rate;
+                self.resampler = None;
+                self.resampler_source_rate = None;
+                // Do not mix residual samples from two source clock domains.
+                collected_samples.clear();
+            }
+
+            if frame_rate == target_rate {
+                collected_samples.extend(frame.samples);
+            } else {
+                if self.resampler_source_rate != Some(frame_rate) || self.resampler.is_none() {
+                    self.resampler = Some(airplay_resampler::Resampler::new(
+                        frame_rate,
+                        target_rate,
+                        frame.channels,
+                    )?);
+                    self.resampler_source_rate = Some(frame_rate);
+                    self.applied_drift_ppm_x100 = 0;
+                }
+
+                let desired = self.drift_ppm_x100.load(Ordering::Relaxed);
+                if desired != self.applied_drift_ppm_x100 {
+                    if let Some(resampler) = self.resampler.as_mut() {
+                        resampler.set_drift_ppm(desired as f64 / 100.0)?;
+                        self.applied_drift_ppm_x100 = desired;
+                    }
+                }
+
+                let resampled = self
+                    .resampler
+                    .as_mut()
+                    .expect("resampler should be initialized")
+                    .process(&frame.samples)?;
+                collected_samples.extend(resampled);
             }
         }
 
-        if collected_samples.is_empty() {
-            return Ok(None);
-        }
-
-        // Save excess samples for next call
         if collected_samples.len() > target_samples {
             self.residual_samples = collected_samples[target_samples..].to_vec();
             collected_samples.truncate(target_samples);
         }
 
-        // Scale timestamp from source sample rate to target sample rate
-        let scaled_timestamp = if source_rate != target_rate {
-            (self.position_samples as f64 * target_rate as f64 / source_rate as f64) as u64
-        } else {
-            self.position_samples
-        };
-
         Ok(Some(DecodedFrame {
             samples: collected_samples,
             channels: target_format.channels,
             sample_rate: target_rate,
-            timestamp: scaled_timestamp,
+            // The RTP streamer owns the continuous packet clock. This timestamp
+            // is diagnostic/source position only and must never re-anchor RTP.
+            timestamp: self.position_samples,
         }))
     }
 

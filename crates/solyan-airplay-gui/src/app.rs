@@ -151,7 +151,7 @@ impl SolYanAirPlayApp {
             startup_window_forced: false,
         };
 
-        app.log("SolYan AirPlay2 v0.2.13 GUI initialized.");
+        app.log("SolYan AirPlay2 v0.3.0 GUI initialized.");
         app.start_scan(cc.egui_ctx.clone());
         app
     }
@@ -175,7 +175,7 @@ impl SolYanAirPlayApp {
             .unwrap_or_else(|_| std::path::PathBuf::from("."));
         let desktop = base.join("Desktop");
         let dir = if desktop.is_dir() { desktop } else { base };
-        let path = dir.join("SolYan-AirPlay2-v0.2.13-log.txt");
+        let path = dir.join("SolYan-AirPlay2-v0.3.0-log.txt");
         match std::fs::write(&path, body) {
             Ok(()) => {
                 self.status = if self.prefs.vietnamese {
@@ -526,13 +526,14 @@ impl SolYanAirPlayApp {
                             info.elapsed.as_secs_f64()
                         );
                         self.log(format!(
-                            "Stream closed: targets={}, captured={}, silence={}, late={}, transitions={}, dropped={}.",
+                            "Stream closed: targets={}, captured={}, silence={}, late={}, transitions={}, dropped={}, capture_restarts={}.",
                             info.target_names.join(", "),
                             info.captured_chunks,
                             info.silence_chunks,
                             info.late_polls,
                             info.silence_transitions,
-                            info.dropped_chunks
+                            info.dropped_chunks,
+                            info.capture_restarts
                         ));
                     }
                     Err(error) => {
@@ -1304,7 +1305,7 @@ impl SolYanAirPlayApp {
                             .color(theme::ACCENT),
                     );
                     ui.label(
-                        RichText::new("· SolYan AirPlay2 v0.2.13")
+                        RichText::new("· SolYan AirPlay2 v0.3.0")
                             .size(11.5)
                             .strong()
                             .color(theme::text()),
@@ -1340,21 +1341,59 @@ impl eframe::App for SolYanAirPlayApp {
 
         if let Some(rx) = self.progress_rx.clone() {
             while let Ok(progress) = rx.try_recv() {
+                let previous_capture_restarts = self
+                    .progress
+                    .as_ref()
+                    .map(|p| p.capture_restarts)
+                    .unwrap_or(0);
+                let previous_control_degraded = self
+                    .progress
+                    .as_ref()
+                    .map(|p| p.control_degraded)
+                    .unwrap_or(false);
+
+                if progress.capture_restarts > previous_capture_restarts {
+                    self.log(format!(
+                        "WASAPI RECOVERED: capture restarted without tearing down AirPlay (count={}).",
+                        progress.capture_restarts
+                    ));
+                }
+
+                if progress.control_degraded && !previous_control_degraded {
+                    self.log(format!(
+                        "CONTROL DEGRADED: feedback timeout streak={} — RTP continues.",
+                        progress.feedback_timeout_streak
+                    ));
+                } else if !progress.control_degraded && previous_control_degraded {
+                    self.log("CONTROL RECOVERED: AirPlay feedback healthy again.");
+                }
+
                 if self.activity == Activity::PreparingStream
-                    && progress.captured_chunks > 0
+                    && progress.signal_confirmed
+                    && progress.signal_chunks > 0
                     && progress.packets_sent > 0
                 {
                     self.activity = Activity::Streaming;
                     self.status = self.tr(
-                        "AirPlay ready — audio capture and packet flow verified.",
-                        "AirPlay đã sẵn sàng — đã xác nhận thu âm và luồng packet.",
+                        "AirPlay ready — non-silent PCM cleared the startup buffer.",
+                        "AirPlay đã sẵn sàng — PCM có tín hiệu đã đi qua bộ đệm khởi động.",
                     ).into();
                     self.log(format!(
-                        "STREAM READY: captured_chunks={}, packets_sent={}, targets={}.",
+                        "STREAM READY: signal_chunks={}, peak={}, captured_chunks={}, packets_sent={}, targets={}.",
+                        progress.signal_chunks,
+                        progress.signal_peak,
                         progress.captured_chunks,
                         progress.packets_sent,
                         progress.target_count
                     ));
+                } else if self.activity == Activity::PreparingStream
+                    && progress.packets_sent > 0
+                    && !progress.signal_confirmed
+                {
+                    self.status = self.tr(
+                        "AirPlay session armed — waiting for real audio to clear the startup buffer...",
+                        "AirPlay đã được kích hoạt — đang chờ âm thanh thật đi qua bộ đệm khởi động...",
+                    ).into();
                 }
                 self.progress = Some(progress);
             }
