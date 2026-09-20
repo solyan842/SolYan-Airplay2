@@ -842,7 +842,10 @@ impl Connection {
         .await
         .map_err(|_| CoreError::Timeout)??;
         if record_resp.status_code != 200 {
-            return Err(CoreError::Rtsp(RtspError::UnexpectedStatus(record_resp.status_code)));
+            return Err(CoreError::Rtsp(RtspError::SetupFailed(format!(
+                "initial RECORD returned HTTP {}",
+                record_resp.status_code
+            ))));
         }
         tracing::info!("Initial RECORD acknowledged");
 
@@ -857,7 +860,10 @@ impl Connection {
             setup2_resp.body.is_some()
         );
         if setup2_resp.status_code != 200 {
-            return Err(CoreError::Rtsp(RtspError::UnexpectedStatus(setup2_resp.status_code)));
+            return Err(CoreError::Rtsp(RtspError::SetupFailed(format!(
+                "audio SETUP phase 2 returned HTTP {}",
+                setup2_resp.status_code
+            ))));
         }
         if let Some(ref body) = setup2_resp.body {
             tracing::debug!("SETUP phase2 response body (hex, first 100 bytes): {:02x?}", &body[..body.len().min(100)]);
