@@ -11,8 +11,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex as AsyncMutex;
 
-const MAX_SYNTHETIC_QUEUE_CHUNKS: usize = 4;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveStreamMode {
     Single,
@@ -194,8 +192,8 @@ fn validate_capture_format(capture: &CaptureHandle, expected_rate: Option<u32>) 
 
     if let Some(rate) = expected_rate {
         if capture.format.sample_rate != rate {
-            bail!(
-                "WASAPI mix format changed during playback: {} -> {} Hz",
+            tracing::info!(
+                "WASAPI native mix rate changed during playback: {} -> {} Hz; keeping AirPlay session alive and rebuilding the live resampler",
                 rate,
                 capture.format.sample_rate
             );
@@ -592,7 +590,6 @@ pub async fn run_live_stream(
     let mut signal_confirmed = false;
     let mut dropped_chunks = 0u64;
     let mut next_progress = Instant::now() + Duration::from_millis(500);
-    let mut next_silence_at = Instant::now() + silence_chunk_period;
     let mut packets_sent = 0u64;
     let mut retransmit_requested = 0u64;
     let mut retransmit_fulfilled = 0u64;
@@ -635,7 +632,6 @@ pub async fn run_live_stream(
                         in_silence = true;
                         last_real_at = None;
                         last_samples.fill(0);
-                        next_silence_at = Instant::now() + silence_chunk_period;
                         tracing::info!(
                             "WASAPI recovery complete; AirPlay session preserved (restart #{})",
                             capture_restarts
@@ -709,58 +705,28 @@ pub async fn run_live_stream(
             }
             None => {
                 late_polls += 1;
-                let now = Instant::now();
 
+                // IMPORTANT: after RTP has started there is exactly one owner of
+                // wire silence: AudioStreamer. Do not manufacture source-rate
+                // silence here. When WASAPI is temporarily quiet (pause, track
+                // switch, WAV -> FLAC, player reopen), the live decoder may have
+                // no PCM, and the streamer advances the existing RTP
+                // sequence/timestamp with target-format ALAC silence.
+                //
+                // This keeps the AirPlay session, encoder clock and packet clock
+                // independent from the lifecycle/format of the Windows source.
                 if !in_silence {
                     let grace_elapsed = last_real_at
                         .map(|t| t.elapsed() >= SILENCE_GRACE)
                         .unwrap_or(false);
-
-                    // Short WASAPI scheduling gaps are absorbed by the audio buffer.
-                    // Do not manufacture audio during the grace window, but still
-                    // run volume/progress logic below.
                     if grace_elapsed {
-                        let samples = ramp_to_zero(
-                            &last_samples,
-                            CHANNELS as usize,
-                            source_block_frames,
-                            transition_frames,
+                        in_silence = true;
+                        silence_transitions += 1;
+                        last_samples.fill(0);
+                        tracing::debug!(
+                            "WASAPI source idle; RTP continuity delegated to AudioStreamer"
                         );
-                        let frame = LivePcmFrame {
-                            samples,
-                            channels: CHANNELS,
-                            sample_rate: source_rate,
-                        };
-
-                        // Synthetic audio must never block the real PCM producer.
-                        if sender.queued_frames() < MAX_SYNTHETIC_QUEUE_CHUNKS
-                            && sender.try_send(frame)
-                        {
-                            silence_chunks += 1;
-                            silence_transitions += 1;
-                            in_silence = true;
-                            last_samples.fill(0);
-                            next_silence_at = now + silence_chunk_period;
-                        }
                     }
-                } else if now >= next_silence_at {
-                    // Keep the wire alive at the SOURCE AUDIO cadence. Polling is
-                    // intentionally faster than a PCM block, so emitting one silence
-                    // block per poll would overfill the queue and bury the next track.
-                    if sender.queued_frames() < MAX_SYNTHETIC_QUEUE_CHUNKS {
-                        let frame = LivePcmFrame {
-                            samples: vec![0; source_block_frames * CHANNELS as usize],
-                            channels: CHANNELS,
-                            sample_rate: source_rate,
-                        };
-
-                        if sender.try_send(frame) {
-                            silence_chunks += 1;
-                        }
-                    }
-
-                    // Never catch up missed silence in a burst.
-                    next_silence_at = now + silence_chunk_period;
                 }
             }
         }
