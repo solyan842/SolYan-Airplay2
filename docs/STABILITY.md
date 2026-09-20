@@ -108,3 +108,28 @@ Single-speaker native AirPlay 2 uses a persistent sender-owned PTP timeline.
   every 2s; Delay_Req is answered with Delay_Resp.
 - Source silence, track changes and WASAPI recovery do not change the PTP
   grandmaster or reset RTP sequence/timestamp continuity.
+
+
+## Warm timeline re-anchor after source silence (v0.2.20)
+
+The live Windows capture path now treats a long source-silence interval as a
+timeline-health boundary, not as a reason to tear down AirPlay.
+
+- Short capture jitter remains covered by the 350ms silence grace and does not
+  trigger re-anchor.
+- After 2 seconds of real-source silence, the producer arms a lock-free warm
+  timeline re-anchor while synthetic silence continues.
+- The streamer consumes the request on its next packet, clears only the stable
+  RTP->wall-clock anchor and last-sync marker, and therefore forces an immediate
+  PTP/NTP sync packet.
+- RTP sequence, RTP timestamp continuity, first-packet marker state, ChaCha
+  session key, RTSP session and PTP ClockID are preserved.
+- No FLUSH, RECORD, reconnect or pair-verify occurs.
+- One re-anchor is armed per silence interval; it is not repeated continuously
+  while the PC remains idle.
+- When real PCM resumes, it stays on the existing RTP stream and receives the
+  already refreshed render mapping.
+
+The intent is to recover receivers that remain network-connected yet stop
+rendering after an application/player switch or several seconds without real
+Windows PCM.
