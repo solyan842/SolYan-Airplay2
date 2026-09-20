@@ -33,7 +33,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::net::TcpStream;
 
-/// Generate a random MAC-like device ID for the client.
+/// Generate a random MAC-like sender ID.
 fn generate_device_id() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
@@ -46,6 +46,57 @@ fn generate_device_id() -> String {
         rng.gen::<u8>(),
         rng.gen::<u8>()
     )
+}
+
+fn sender_device_id_file() -> PathBuf {
+    if let Ok(base) = std::env::var("LOCALAPPDATA") {
+        return PathBuf::from(base)
+            .join("SolYan")
+            .join("AirPlay2")
+            .join("sender-device-id.txt");
+    }
+    PathBuf::from(".solyan_airplay_sender_id")
+}
+
+fn normalize_sender_device_id(value: &str) -> Option<String> {
+    let hex: String = value
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .collect::<String>()
+        .to_uppercase();
+    if hex.len() != 12 {
+        return None;
+    }
+    Some(format!(
+        "{}:{}:{}:{}:{}:{}",
+        &hex[0..2], &hex[2..4], &hex[4..6],
+        &hex[6..8], &hex[8..10], &hex[10..12]
+    ))
+}
+
+/// One stable DACP/device identity for the whole SolYan sender.
+///
+/// Native AirPlay 2 ties RTSP/DACP identity, timingPeerInfo and PTP ClockID
+/// together. Generating a fresh ID on every Start made the same paired sender
+/// appear as a new timing controller each session.
+fn stable_sender_device_id() -> String {
+    let path = sender_device_id_file();
+    if let Ok(existing) = fs::read_to_string(&path) {
+        if let Some(id) = normalize_sender_device_id(&existing) {
+            return id;
+        }
+    }
+
+    let id = generate_device_id();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Err(err) = fs::write(&path, format!("{}\n", id)) {
+        warn!("Could not persist stable sender device ID at {}: {}", path.display(), err);
+    } else {
+        info!("Created stable SolYan sender identity at {}", path.display());
+    }
+    id
 }
 
 /// Persisted sender identity for pair-verify after initial pair-setup.
@@ -111,7 +162,7 @@ impl PersistentIdentity {
         server_ltpk: Option<[u8; 32]>,
         server_identifier: Option<&[u8]>,
     ) -> Self {
-        let device_id = generate_device_id();
+        let device_id = stable_sender_device_id();
         let dacp_id = device_id.replace(":", "");
         Self {
             device_id: device_id.clone(),
@@ -252,8 +303,9 @@ impl Connection {
 
     /// Create connection with PIN for protected devices.
     pub async fn connect_with_pin(device: Device, config: StreamConfig, pin: &str) -> Result<Self> {
-        // Generate a stable client device ID for this session
-        let client_device_id = generate_device_id();
+        // One stable DACP/device identity is reused across every transient
+        // HomePod session and is also the source of the PTP ClockID.
+        let client_device_id = stable_sender_device_id();
 
         // Generate a stable identity keypair for pairing
         let identity = IdentityKeyPair::generate();
@@ -558,8 +610,8 @@ impl Connection {
     /// - **Normal (HKP=3)**: User PIN, M1-M6, identity saved, for Apple TV
     /// - **Transient (HKP=4)**: PIN "3939", M1-M4 only, no persistence, for HomePod
     pub async fn connect_with_pin_pairing(device: Device, config: StreamConfig, pin: &str) -> Result<Self> {
-        let client_device_id = generate_device_id();
-        debug!("Using fresh device ID for PIN pairing session: {}", client_device_id);
+        let client_device_id = stable_sender_device_id();
+        debug!("Using stable sender device ID for PIN pairing session: {}", client_device_id);
 
         // 1. TCP connect
         let ip_addr = select_best_address(&device.addresses)
