@@ -163,11 +163,18 @@ pub async fn run_live_stream(
     const TARGET_RATE: u32 = 44_100;
     const CHANNELS: u8 = 2;
     const TARGET_PACKET_FRAMES: usize = 352;
-    const PREBUFFER_CHUNKS: u64 = 24;
-    const LIVE_QUEUE_CHUNKS: usize = 96;
+    // Keep the live handoff shallow enough to stay real-time while still
+    // carrying enough runway for the streamer's ~400ms internal prime.
+    const LIVE_QUEUE_CHUNKS: usize = 32;
     const SILENCE_POLL: Duration = Duration::from_millis(8);
-    const ACTIVE_POLL: Duration = Duration::from_millis(20);
-    const SILENCE_GRACE: Duration = Duration::from_millis(120);
+    // 1024 frames at a common 48kHz Windows endpoint arrive every ~21.3ms.
+    // A 20ms receive timeout classified healthy cadence as "late".
+    const ACTIVE_POLL: Duration = Duration::from_millis(35);
+    // The AirPlay streamer already has hundreds of milliseconds of PCM runway.
+    // Do not fade to synthetic silence for ordinary scheduler hiccups.
+    const SILENCE_GRACE: Duration = Duration::from_millis(350);
+    const STARTUP_PRIME_MS: u64 = 450;
+    const FEEDBACK_MAX_CONSECUTIVE_MISSES: u32 = 3;
     const TRANSITION_MS: u32 = 2;
     const SIGNAL_PEAK_THRESHOLD: u16 = 32;
     const SIGNAL_CONFIRM_PACKETS: u64 = 120;
@@ -236,22 +243,102 @@ pub async fn run_live_stream(
     let (sender, decoder) =
         LiveAudioDecoder::create_pair(source_rate, CHANNELS, LIVE_QUEUE_CHUNKS);
 
-    // Prime AirPlay with pure silence only. Mixing "maybe real / maybe silence"
-    // during session startup can create a discontinuity exactly when RECORD starts.
-    // The first real PCM block is faded in after streaming is established.
-    let mut prebuffered = 0u64;
+    // Native AP2 senders arm the session first, then start only when audio is
+    // already buffered. Prime from the actual Windows loopback stream instead
+    // of inserting a fixed half-second of silence in front of the music.
+    //
+    // If the Windows render endpoint is genuinely idle, feed silence at SOURCE
+    // cadence so the priming duration remains bounded and the RTP timeline can
+    // still start cleanly when content arrives later.
+    let startup_prime_chunks = (
+        (source_rate as u64 * STARTUP_PRIME_MS / 1000)
+            + source_block_frames as u64
+            - 1
+    ) / source_block_frames as u64;
+
+    let mut startup_chunks = 0u64;
+    let mut captured_chunks = 0u64;
+    let mut signal_chunks = 0u64;
+    let mut signal_peak = 0u16;
     let mut silence_chunks = 0u64;
-    while prebuffered < PREBUFFER_CHUNKS && !control.is_stopped() {
-        let frame = LivePcmFrame {
-            samples: vec![0; source_block_frames * CHANNELS as usize],
-            channels: CHANNELS,
-            sample_rate: source_rate,
-        };
-        if sender.send(frame) {
-            prebuffered += 1;
-            silence_chunks += 1;
+    let mut late_polls = 0u64;
+    let mut silence_transitions = 0u64;
+    let mut in_silence = true;
+    let mut last_real_at: Option<Instant> = None;
+    let mut last_samples = vec![0i16; CHANNELS as usize];
+    let mut next_prime_silence_at = Instant::now();
+
+    while startup_chunks < startup_prime_chunks && !control.is_stopped() {
+        match capture.poll_timeout(SILENCE_POLL)? {
+            Some(chunk) => {
+                let mut samples = chunk.samples;
+                let chunk_peak = samples
+                    .iter()
+                    .map(|sample| sample.unsigned_abs())
+                    .max()
+                    .unwrap_or(0);
+
+                if in_silence {
+                    fade_in_from_zero(
+                        &mut samples,
+                        chunk.channels as usize,
+                        transition_frames,
+                    );
+                    in_silence = false;
+                    silence_transitions += 1;
+                }
+
+                remember_last_samples(
+                    &samples,
+                    chunk.channels as usize,
+                    &mut last_samples,
+                );
+
+                if sender.send(LivePcmFrame {
+                    samples,
+                    channels: chunk.channels as u8,
+                    sample_rate: chunk.sample_rate,
+                }) {
+                    startup_chunks += 1;
+                    captured_chunks += 1;
+                    last_real_at = Some(Instant::now());
+                    if chunk_peak > SIGNAL_PEAK_THRESHOLD {
+                        signal_chunks += 1;
+                        signal_peak = signal_peak.max(chunk_peak);
+                    }
+                }
+            }
+            None => {
+                late_polls += 1;
+                let now = Instant::now();
+                if now >= next_prime_silence_at {
+                    if sender.send(LivePcmFrame {
+                        samples: vec![0; source_block_frames * CHANNELS as usize],
+                        channels: CHANNELS,
+                        sample_rate: source_rate,
+                    }) {
+                        startup_chunks += 1;
+                        silence_chunks += 1;
+                        if !in_silence {
+                            in_silence = true;
+                            silence_transitions += 1;
+                            last_samples.fill(0);
+                        }
+                    }
+                    next_prime_silence_at = now + silence_chunk_period;
+                }
+            }
         }
     }
+
+    tracing::info!(
+        "Startup PCM prime ready: chunks={}, source_ms≈{}, captured={}, synthetic_silence={}, signal={}",
+        startup_chunks,
+        STARTUP_PRIME_MS,
+        captured_chunks,
+        silence_chunks,
+        signal_chunks
+    );
 
     if control.is_stopped() {
         capture.stop();
@@ -269,31 +356,22 @@ pub async fn run_live_stream(
         }
     }
 
-    // Re-assert volume after RECORD, then twice more during the silence
-    // prebuffer window. This prevents the receiver from restoring a stale
-    // previous-session volume after our first SET_PARAMETER.
-    let mut applied_volume = control.volume();
-    client.set_volume(applied_volume).await?;
-    tokio::time::sleep(Duration::from_millis(120)).await;
-    let desired_volume = control.volume();
-    client.set_volume(desired_volume).await?;
-    applied_volume = desired_volume;
-    tokio::time::sleep(Duration::from_millis(180)).await;
-    let desired_volume = control.volume();
-    client.set_volume(desired_volume).await?;
-    applied_volume = desired_volume;
-
-    // From this point onward the audio producer must never wait on RTSP.
-    // Keep feedback/keep-alive on a separate control task. Volume and stats
-    // use try_lock() below so a slow receiver cannot stall WASAPI -> PCM.
+    // From the instant RTP starts, no RTSP operation may block PCM delivery.
+    // Feedback and the two defensive startup-volume reassertions run on the
+    // control plane behind their own async mutex.
+    let mut applied_volume = initial_volume;
     let client = Arc::new(AsyncMutex::new(client));
+
     let feedback_client = Arc::clone(&client);
     let feedback_stop = Arc::new(AtomicBool::new(false));
     let feedback_stop_worker = Arc::clone(&feedback_stop);
+    let feedback_unhealthy = Arc::new(AtomicBool::new(false));
+    let feedback_unhealthy_worker = Arc::clone(&feedback_unhealthy);
     let feedback_task = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(2));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         ticker.tick().await; // consume the immediate first tick
+        let mut consecutive_misses = 0u32;
 
         loop {
             ticker.tick().await;
@@ -308,32 +386,56 @@ pub async fn run_live_stream(
             };
             let elapsed = feedback_started.elapsed();
 
-            if let Err(err) = result {
-                tracing::warn!("AirPlay feedback failed: {err}");
+            match result {
+                Ok(()) => consecutive_misses = 0,
+                Err(err) => {
+                    consecutive_misses += 1;
+                    tracing::warn!(
+                        "AirPlay feedback miss {}/{}: {}",
+                        consecutive_misses,
+                        FEEDBACK_MAX_CONSECUTIVE_MISSES,
+                        err
+                    );
+                    if consecutive_misses >= FEEDBACK_MAX_CONSECUTIVE_MISSES {
+                        feedback_unhealthy_worker.store(true, Ordering::Release);
+                        break;
+                    }
+                }
             }
+
             if elapsed >= Duration::from_millis(500) {
                 tracing::warn!(
-                    "AirPlay feedback was slow ({:.0} ms); audio producer remained independent",
+                    "AirPlay feedback was slow ({:.0} ms); PCM delivery stayed independent",
                     elapsed.as_secs_f64() * 1000.0
                 );
             }
         }
     });
 
+    let volume_client = Arc::clone(&client);
+    let volume_control = control.clone();
+    let volume_task = tokio::spawn(async move {
+        for delay in [150u64, 350u64] {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+            if volume_control.is_stopped() {
+                break;
+            }
+            let desired = volume_control.volume();
+            let _ = tokio::time::timeout(Duration::from_millis(750), async {
+                let mut guard = volume_client.lock().await;
+                guard.set_volume(desired).await
+            })
+            .await;
+        }
+    });
+
     let started = Instant::now();
-    let mut captured_chunks = 0u64;
-    let mut signal_chunks = 0u64;
-    let mut signal_peak = 0u16;
-    let mut first_signal_packet_baseline: Option<u64> = None;
+    let mut first_signal_packet_baseline: Option<u64> =
+        if signal_chunks > 0 { Some(0) } else { None };
     let mut signal_confirmed = false;
     let mut dropped_chunks = 0u64;
-    let mut late_polls = 0u64;
-    let mut silence_transitions = 0u64;
-    let mut in_silence = true;
-    let mut last_real_at: Option<Instant> = None;
-    let mut last_samples = vec![0i16; CHANNELS as usize];
     let mut next_progress = Instant::now() + Duration::from_millis(500);
-    let mut next_silence_at = Instant::now();
+    let mut next_silence_at = Instant::now() + silence_chunk_period;
     let mut packets_sent = 0u64;
     let mut retransmit_requested = 0u64;
     let mut retransmit_fulfilled = 0u64;
@@ -342,6 +444,14 @@ pub async fn run_live_stream(
     let mut loop_error: Option<anyhow::Error> = None;
 
     while !control.is_stopped() {
+        if feedback_unhealthy.load(Ordering::Acquire) {
+            loop_error = Some(anyhow!(
+                "AirPlay control session lost after {} consecutive feedback failures",
+                FEEDBACK_MAX_CONSECUTIVE_MISSES
+            ));
+            break;
+        }
+
         let poll_window = if in_silence { SILENCE_POLL } else { ACTIVE_POLL };
         let captured = match capture.poll_timeout(poll_window) {
             Ok(captured) => captured,
@@ -528,7 +638,9 @@ pub async fn run_live_stream(
     // Stop control-plane work before owning the client for shutdown.
     feedback_stop.store(true, Ordering::Release);
     feedback_task.abort();
+    volume_task.abort();
     let _ = feedback_task.await;
+    let _ = volume_task.await;
 
     {
         let mut guard = client.lock().await;

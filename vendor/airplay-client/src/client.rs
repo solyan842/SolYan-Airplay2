@@ -442,9 +442,10 @@ impl AirPlayClient {
 
         connection.send_feedback().await?;
 
-        // Also send feedback to group connections to prevent session timeouts
+        // Also keep every group member alive. One dead member is a session-health
+        // failure for the group; callers apply consecutive-miss tolerance.
         for conn in &mut self.group_connections {
-            let _ = conn.send_feedback().await;
+            conn.send_feedback().await?;
         }
 
         Ok(())

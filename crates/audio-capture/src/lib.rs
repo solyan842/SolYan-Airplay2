@@ -177,7 +177,10 @@ fn convert_native_to_stereo_i16(
 pub fn start_default_loopback(_requested: AudioFormat) -> Result<CaptureHandle> {
     use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode, initialize_mta};
 
-    const EVENT_POLL_MS: u32 = 250;
+    // Event mode normally wakes immediately. If Windows misses or delays a
+    // loopback event, inspect the capture buffer again after 20ms instead of
+    // starving the AirPlay pipeline for a quarter of a second.
+    const EVENT_POLL_MS: u32 = 20;
     const OUTPUT_BLOCK_FRAMES: usize = 1024;
 
     // Capture must be lossless. The previous bounded queue + try_send could

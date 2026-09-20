@@ -434,6 +434,9 @@ struct StreamerInner {
     spatial_snapshot: Option<SpatialSnapshot>,
     /// Track whether first audio packet has been sent (requires marker bit)
     first_packet_sent: bool,
+    /// Live-source starvation is filled with silence on the existing RTP
+    /// timeline. The first real packet after the fill is micro-faded in.
+    live_starvation_active: bool,
     /// Render delay in nanoseconds added to NTP timestamps in sync packets.
     /// Tells the receiver to render audio this far in the future, giving more
     /// time for retransmit recovery of lost packets.
@@ -501,6 +504,7 @@ impl AudioStreamer {
                 spatial_encoders: Vec::new(),
                 spatial_snapshot: None,
                 first_packet_sent: false,
+                live_starvation_active: false,
                 render_delay_ns: 0,
                 use_ptp_sync: false,
                 ptp_master_clock_id: [0u8; 8],
@@ -750,6 +754,7 @@ impl AudioStreamer {
             inner.live_decoder = Some(live_decoder);
             inner.decoder = None; // Clear file decoder if any
             inner.encoder = Some(create_encoder(inner.config.audio_format.clone())?);
+            inner.live_starvation_active = false;
             inner.state = StreamerState::Buffering;
             frame_duration_ns = inner.config.audio_format.frames_per_packet as u64
                 * 1_000_000_000u64
@@ -905,6 +910,7 @@ impl AudioStreamer {
     pub async fn reset_after_flush(&mut self) {
         let mut inner = self.inner.lock().await;
         inner.first_packet_sent = false;
+        inner.live_starvation_active = false;
         inner.last_sync_rtp = 0;
         inner.sync_anchor_timestamp = None;
         inner.sync_anchor_wall_ns = None;
@@ -1134,7 +1140,41 @@ async fn run_streamer(
                 }
             }
 
-            let frame = guard.buffer.pop();
+            let live_source = guard.live_decoder.is_some();
+            let live_frames_per_packet = guard.config.audio_format.frames_per_packet as usize;
+            let live_channels = guard.config.audio_format.channels as usize;
+            let live_sample_rate = guard.config.audio_format.sample_rate.as_hz() as usize;
+            let mut starvation_fill = false;
+            let mut recovering_from_starvation = false;
+
+            let frame = match guard.buffer.pop() {
+                Some(frame) => {
+                    recovering_from_starvation = guard.live_starvation_active;
+                    guard.live_starvation_active = false;
+                    Some(frame)
+                }
+                None if live_source => {
+                    // A live AirPlay session must not stop its RTP clock when the
+                    // source starves. Send one packet of PCM silence on the same
+                    // sequence/timestamp line instead of skipping a packet or
+                    // forcing the receiver back through Buffering.
+                    let count = underrun_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                    if count <= 5 || count % 50 == 0 {
+                        tracing::warn!(
+                            "Live source starvation #{}: filling RTP timeline with silence",
+                            count
+                        );
+                    }
+                    starvation_fill = true;
+                    guard.live_starvation_active = true;
+                    Some(crate::AudioFrame::new(
+                        vec![0; live_frames_per_packet * live_channels],
+                        guard.current_timestamp,
+                    ))
+                }
+                None => None,
+            };
+
             if let Some(frame) = frame {
                 // Diagnostic: log PCM sample energy for first few frames
                 static DIAG_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -1154,13 +1194,29 @@ async fn run_streamer(
                     );
                 }
 
-                // Process through equalizer if enabled
+                // Process through equalizer if enabled. If the live source has
+                // just recovered from a wire-level silence fill, micro-fade the
+                // first ~2ms so zero -> arbitrary PCM cannot create a click.
+                let mut raw_samples = (*frame.samples).clone();
+                if recovering_from_starvation && !starvation_fill && live_channels > 0 {
+                    let available_frames = raw_samples.len() / live_channels;
+                    let fade_frames = ((live_sample_rate * 2) / 1000)
+                        .max(1)
+                        .min(available_frames);
+                    for frame_idx in 0..fade_frames {
+                        let gain = frame_idx as f32 / fade_frames as f32;
+                        for ch in 0..live_channels {
+                            let idx = frame_idx * live_channels + ch;
+                            raw_samples[idx] = (raw_samples[idx] as f32 * gain).round() as i16;
+                        }
+                    }
+                }
+
                 let samples_to_encode: Vec<i16> = if let Some(ref mut eq) = guard.equalizer {
-                    let mut samples = (*frame.samples).clone();
-                    eq.process(&mut samples);
-                    samples
+                    eq.process(&mut raw_samples);
+                    raw_samples
                 } else {
-                    (*frame.samples).clone()
+                    raw_samples
                 };
 
                 // Check if spatial processing is enabled and active
@@ -1428,9 +1484,12 @@ async fn run_streamer(
                     }
                 }
             } else {
+                // File/finite decoders keep the historical buffering behavior.
+                // Live sources never reach this branch: their missing PCM is
+                // represented as silence on the existing RTP timeline above.
                 let count = underrun_counter.fetch_add(1, Ordering::Relaxed) + 1;
                 if count <= 5 || count % 50 == 0 {
-                    tracing::warn!("Buffer underrun #{} (buffer empty, packet skipped)", count);
+                    tracing::warn!("Buffer underrun #{} (non-live source)", count);
                 }
                 guard.state = StreamerState::Buffering;
                 state_cache.store(StreamerState::Buffering as u8, Ordering::Relaxed);

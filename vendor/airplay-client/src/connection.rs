@@ -1543,20 +1543,19 @@ impl Connection {
     pub async fn send_feedback(&mut self) -> Result<()> {
         let uri = self.session.request_uri();
         let req = RtspRequest::feedback(uri);
-        match tokio::time::timeout(std::time::Duration::from_secs(2), self.rtsp.send(req)).await {
-            Ok(Ok(resp)) => {
-                tracing::trace!("Feedback response: status={}", resp.status_code);
-                Ok(())
-            }
-            Ok(Err(e)) => {
-                tracing::debug!("Feedback request failed: {}", e);
-                Err(e)
-            }
-            Err(_) => {
-                tracing::debug!("Feedback request timed out");
-                Ok(()) // Don't fail on timeout - it's just a keepalive
-            }
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            self.rtsp.send(req),
+        )
+        .await
+        .map_err(|_| CoreError::Timeout)??;
+
+        if resp.status_code != 200 {
+            return Err(CoreError::Rtsp(RtspError::UnexpectedStatus(resp.status_code)));
         }
+
+        tracing::trace!("Feedback response: status={}", resp.status_code);
+        Ok(())
     }
 
     /// Complete RTSP SETUP with PTP master mode for group streaming.
