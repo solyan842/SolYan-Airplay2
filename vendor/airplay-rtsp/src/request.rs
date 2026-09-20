@@ -212,13 +212,14 @@ impl RtspRequest {
             .body(body)
     }
 
-    /// Create a feedback request (keepalive/progress).
+    /// Create the native AirPlay 2 feedback/keepalive request.
     ///
-    /// AirPlay 2 receivers expect periodic feedback requests (~every 2 seconds).
-    /// The response contains timing and buffer status from the receiver.
-    pub fn feedback(uri: impl Into<String>) -> Self {
-        Self::new(RtspMethod::Post, format!("{}/feedback", uri.into()))
-            .content_type_bplist()
+    /// This endpoint is global to the RTSP control connection, not relative
+    /// to the session URI. Apple-compatible senders use exactly:
+    ///   POST /feedback
+    /// with no request body and no Content-Type header.
+    pub fn feedback() -> Self {
+        Self::new(RtspMethod::Post, "/feedback")
     }
 
     /// Create OPTIONS request with Apple-Challenge header (RAOP handshake).
@@ -424,6 +425,15 @@ mod tests {
             let req = RtspRequest::flush("rtsp://local/session-123");
             assert_eq!(req.method, RtspMethod::Flush);
             assert_eq!(req.uri, "rtsp://local/session-123");
+        }
+
+        #[test]
+        fn feedback_uses_global_keepalive_endpoint_without_body() {
+            let req = RtspRequest::feedback();
+            assert_eq!(req.method, RtspMethod::Post);
+            assert_eq!(req.uri, "/feedback");
+            assert!(req.body.is_none());
+            assert!(!req.headers.contains_key("Content-Type"));
         }
 
         #[test]
