@@ -170,3 +170,22 @@ The v0.2.20 experimental source-silence warm re-anchor is not part of this
 branch. A live realtime session keeps one continuous RTP/timing line; timing
 ownership is repaired at the gPTP layer instead of repeatedly reseating the
 render anchor after ordinary source silence.
+
+
+## Native AP2 idle keepalive contract (v0.2.22)
+
+The native AirPlay 2 feedback keepalive is a global RTSP control endpoint:
+
+- Send exactly `POST /feedback`.
+- Do not derive the path from the session URI.
+- Do not attach a request body or Content-Type when no feedback body exists.
+- Feedback runs on an independent control task and never blocks PCM/RTP.
+- Do not wrap an encrypted RTSP exchange in a shorter outer cancellation
+  timeout. Cancelling mid-HAP-frame can leave the next read starting inside a
+  previous encrypted frame.
+- HTTP status misses are treated as degraded keepalive health while RTP
+  continues; transport/framing failures remain hard control-channel failures.
+
+This fixes the pre-v0.2.22 behavior that sent
+`rtsp://receiver/SESSION_UUID/feedback` instead of the native `/feedback`
+keepalive endpoint.
