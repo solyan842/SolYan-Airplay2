@@ -887,15 +887,16 @@ mod clickless_tests {
     }
 
     #[test]
-    fn synthetic_silence_is_paced_at_source_audio_time() {
+    fn startup_silence_is_paced_at_source_audio_time() {
         let source_rate = 48_000u32;
         let source_block_frames = 1024usize;
         let period =
             Duration::from_secs_f64(source_block_frames as f64 / source_rate as f64);
 
+        // Startup prime may use source-paced silence before RTP starts.
+        // Runtime wire silence is owned exclusively by AudioStreamer.
         assert!(period >= Duration::from_millis(21));
         assert!(period <= Duration::from_millis(22));
-        assert!(MAX_SYNTHETIC_QUEUE_CHUNKS <= 4);
     }
 
     #[test]
