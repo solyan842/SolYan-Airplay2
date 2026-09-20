@@ -189,3 +189,31 @@ The native AirPlay 2 feedback keepalive is a global RTSP control endpoint:
 This fixes the pre-v0.2.22 behavior that sent
 `rtsp://receiver/SESSION_UUID/feedback` instead of the native `/feedback`
 keepalive endpoint.
+
+
+## Service supervisor and RTP heartbeat (v0.2.23)
+
+The Windows GUI now treats live streaming as a long-lived service rather than
+a one-shot task.
+
+- If run_live_stream exits unexpectedly while the user has not pressed Stop,
+  the worker does not return the UI to Idle.
+- The service automatically reconstructs the AirPlay session with bounded
+  reconnect backoff: 250ms, 500ms, 1s, then 2s maximum.
+- User Stop remains authoritative and terminates the supervisor cleanly.
+- The UI logs AUTO-RECOVERY with attempt number, reason and retry delay.
+
+The live core also verifies the wire heartbeat:
+
+- packets_sent must continue advancing even during source silence because
+  encoded-silence RTP packets keep the session clock alive.
+- If an observed packets_sent counter does not advance for 3 seconds while the
+  live service is active, the run is declared stalled.
+- The supervisor then rebuilds the session automatically instead of leaving the
+  application in a permanently silent state.
+- SERVICE HEALTH telemetry is emitted once per second with captured chunks,
+  synthetic silence chunks, live queue depth, packets_sent, feedback streak,
+  control health and capture restart count.
+
+This is intentionally receiver-agnostic and covers HomePod, AirPort and other
+receivers that exhibit the same long-idle failure.
