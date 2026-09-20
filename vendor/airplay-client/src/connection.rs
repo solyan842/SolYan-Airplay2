@@ -241,12 +241,7 @@ pub struct Connection {
 }
 
 fn session_clock_identity(session: &RtspSession) -> [u8; 8] {
-    let session_id = session.id();
-    let mut id = [0u8; 8];
-    id.copy_from_slice(&session_id.as_bytes()[..8]);
-    // Keep ClockID positive for plist implementations using signed int64.
-    id[0] &= 0x7f;
-    id
+    session.sender_clock_identity()
 }
 
 impl Connection {
@@ -408,10 +403,12 @@ impl Connection {
         config: StreamConfig,
         persistent_id: &PersistentIdentity,
     ) -> Result<Self> {
-        // Generate a FRESH random client device ID for this session (like transient pairing)
-        // The Ed25519 identity in pair-verify M3 identifies us, not the RTSP device ID
-        let client_device_id = generate_device_id();
-        debug!("Using fresh device ID for RTSP session: {}", client_device_id);
+        // Pair-verify must reuse the exact sender identity that was paired.
+        // Changing X-Apple-Device-ID/DACP-ID while keeping the old HAP key
+        // creates two identities for one controller and destabilizes HomePod
+        // timing/control association.
+        let client_device_id = persistent_id.device_id.clone();
+        debug!("Reusing persisted sender device ID for pair-verify: {}", client_device_id);
 
         // Reconstruct the controller identity
         let controller = persistent_id.to_controller().ok_or_else(|| {
