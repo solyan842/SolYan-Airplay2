@@ -1,15 +1,25 @@
-# SolYan AirPlay2
+# SolYan AirPlay Engine V1
 
-Windows sender project for streaming PC audio to Apple HomePod / HomePod mini using real AirPlay 2.
+Clean rewrite of the SolYan Windows AirPlay sender.
 
-## Goals
+This branch intentionally starts from the repository bootstrap commit and does **not** reuse the previous AirPlay client, audio streamer, RTSP session orchestration, timing engine, or vendor tree.
 
-- Native Windows audio capture (WASAPI loopback)
-- Real AirPlay 2 sender session
-- HomePod / HomePod mini discovery and pairing
-- PTP-capable timing path
-- Low-latency buffered mode where supported
-- Portable Windows build
-- Versioned, testable development
+Current phase: engine invariants first.
 
-> Project bootstrap. Engine work starts on a dedicated development branch.
+- Route separation: RAOP / AirPlay 2 compat / AirPlay 2 native
+- Persistent PCM ring
+- Immutable native RTP timeline
+- Silence is data, never EOF
+- Source/track transitions do not own the AirPlay session
+
+See `docs/ARCHITECTURE-V1.md`.
+
+Target audio profile for the first stable engine:
+
+- ALAC
+- 16-bit
+- 44.1 kHz
+- stereo
+- 352 frames per packet
+
+GUI/WASAPI integration will be added only after the new transport core passes the session-lifecycle acceptance tests.
