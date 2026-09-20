@@ -1,0 +1,22 @@
+name: Rewrite engine build
+
+on:
+  push:
+    branches: ["rewrite/**"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: solyan-rewrite-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  engine:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check clean rewrite workspace
+        run: cargo check --workspace --all-targets
+      - name: Run engine invariants
+        run: cargo test --workspace --all-targets
