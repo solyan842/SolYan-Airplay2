@@ -29,11 +29,11 @@ jobs:
       - name: Upload Windows application
         uses: actions/upload-artifact@v4
         with:
-          name: SolYan-AirPlay2-v0.2.22-Windows
+          name: SolYan-AirPlay2-v0.3.0-Windows
           path: target/release/SolYan-AirPlay2.exe
 
       - name: Upload debug CLI
         uses: actions/upload-artifact@v4
         with:
-          name: SolYan-AirPlay2-v0.2.22-Debug-Tools
+          name: SolYan-AirPlay2-v0.3.0-Debug-Tools
           path: target/release/solyan-airplay.exe
