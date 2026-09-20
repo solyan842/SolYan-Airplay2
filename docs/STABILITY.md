@@ -108,3 +108,65 @@ Single-speaker native AirPlay 2 uses a persistent sender-owned PTP timeline.
   every 2s; Delay_Req is answered with Delay_Resp.
 - Source silence, track changes and WASAPI recovery do not change the PTP
   grandmaster or reset RTP sequence/timestamp continuity.
+
+
+## Native AirPlay 2 gPTP contract (v0.2.21)
+
+v0.2.21 replaces the experimental PTP assumptions from earlier development
+builds with the packet contract measured by current Music Assistant airplay-cli
+and corroborated by OwnTone/libairptp.
+
+### Stable sender identity
+
+- SolYan has one persistent sender Device-ID/DACP-ID stored under
+  %LOCALAPPDATA%/SolYan/AirPlay2.
+- Transient HomePod sessions reuse that ID instead of generating a new sender
+  on every Start.
+- timingPeerInfo.ID and PTP ClockID are deterministically derived from the same
+  sender identity.
+- Pair-verify reuses the persisted paired sender identity.
+
+### gPTP wire invariants
+
+- PTP is IEEE 802.1AS/gPTP: majorSdoId=1 in the high nibble of byte 0.
+- SourcePortIdentity uses the sender ClockID and iOS-style portNumber 0x8005.
+- Sender-grandmaster Announce dataset:
+  priority1=128, priority2=128, clockClass=6, clockAccuracy=0x21,
+  offsetScaledLogVariance=0x436A, timeSource=0x20.
+- Sync/Follow_Up is two-step and sent every 125ms.
+- Announce and Apple Signaling are refreshed every 1s.
+- Announce contains PATH_TRACE.
+- Follow_Up contains both IEEE 802.1AS Follow_Up Information and Apple ClockID
+  organization-extension TLVs.
+- REQUEST_UNICAST_TRANSMISSION is answered with GRANT_UNICAST_TRANSMISSION.
+- Delay_Req is answered on UDP 320.
+- Pdelay_Req is answered with Pdelay_Resp on UDP 319 and
+  Pdelay_Resp_Follow_Up on UDP 320.
+- UDP 319/320 must bind successfully. A native AP2 session does not silently
+  fall back to ephemeral PTP ports.
+
+### Clock ownership routing
+
+Normal AirPlay 2 receivers, older HomePods, stereo-pair members and
+Apple-TV-routed speakers use the sender-owned gPTP grandmaster.
+
+A standalone HomePod is routed to receiver-clock follow mode only when all of
+these discovered properties hold:
+
+- model begins with AudioAccessory
+- osvers major >= 27
+- igl = 1
+- no pgid
+- no tsid
+
+In follow mode SolYan binds gPTP before Session SETUP, sends SETPEERS, then
+waits for the receiver's Announce + Sync/Follow_Up. Streaming is not considered
+timing-ready until both the receiver grandmaster ClockID and a real clock offset
+are locked. Failure to lock is a clear setup error, not a silent Playing state.
+
+### Removed direction
+
+The v0.2.20 experimental source-silence warm re-anchor is not part of this
+branch. A live realtime session keeps one continuous RTP/timing line; timing
+ownership is repaired at the gPTP layer instead of repeatedly reseating the
+render anchor after ordinary source silence.
