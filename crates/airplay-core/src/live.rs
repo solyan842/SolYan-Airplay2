@@ -301,7 +301,9 @@ pub async fn run_live_stream(
                 }) {
                     startup_chunks += 1;
                     captured_chunks += 1;
-                    last_real_at = Some(Instant::now());
+                    let now = Instant::now();
+                    last_real_at = Some(now);
+                    next_prime_silence_at = now + silence_chunk_period;
                     if chunk_peak > SIGNAL_PEAK_THRESHOLD {
                         signal_chunks += 1;
                         signal_peak = signal_peak.max(chunk_peak);
@@ -309,7 +311,6 @@ pub async fn run_live_stream(
                 }
             }
             None => {
-                late_polls += 1;
                 let now = Instant::now();
                 if now >= next_prime_silence_at {
                     if sender.send(LivePcmFrame {
