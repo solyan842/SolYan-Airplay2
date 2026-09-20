@@ -515,6 +515,31 @@ impl SolYanAirPlayApp {
                     }
                 }
             }
+            GuiEvent::StreamRecovering {
+                attempt,
+                backoff_ms,
+                reason,
+            } => {
+                self.activity = Activity::PreparingStream;
+                self.status = self.tr(
+                    "AirPlay service interrupted — reconnecting automatically...",
+                    "Dịch vụ AirPlay bị gián đoạn — đang tự kết nối lại...",
+                ).into();
+                self.last_error = None;
+                self.log(format!(
+                    "AUTO-RECOVERY #{attempt}: {reason} — retry in {backoff_ms} ms."
+                ));
+            }
+            GuiEvent::StreamStopped => {
+                self.activity = Activity::Idle;
+                self.stream_control = None;
+                self.progress_rx = None;
+                self.status = self.tr(
+                    "AirPlay service stopped.",
+                    "Dịch vụ AirPlay đã dừng.",
+                ).into();
+                self.log("Stream supervisor stopped by user.");
+            }
             GuiEvent::StreamFinished(result) => {
                 self.activity = Activity::Idle;
                 self.stream_control = None;
