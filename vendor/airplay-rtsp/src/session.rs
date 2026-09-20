@@ -110,6 +110,54 @@ impl RtspSession {
         self.session_id
     }
 
+    /// Stable sender ID used by RTSP/DACP for this connection.
+    pub fn client_device_id(&self) -> &str {
+        &self.client_device_id
+    }
+
+    /// Deterministic 64-bit PTP identity derived from the sender device ID.
+    ///
+    /// Existing SolYan pairings historically stored a 48-bit MAC-like ID.
+    /// Expand that to EUI-64 rather than inventing a fresh session UUID, so
+    /// pair-verify, timingPeerInfo and PTP packets all describe one sender.
+    pub fn sender_clock_identity(&self) -> [u8; 8] {
+        let hex: String = self
+            .client_device_id
+            .chars()
+            .filter(|c| c.is_ascii_hexdigit())
+            .collect();
+
+        if hex.len() == 16 {
+            let mut out = [0u8; 8];
+            for (i, byte) in out.iter_mut().enumerate() {
+                *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap_or(0);
+            }
+            return out;
+        }
+
+        if hex.len() == 12 {
+            let mut mac = [0u8; 6];
+            for (i, byte) in mac.iter_mut().enumerate() {
+                *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap_or(0);
+            }
+            return [
+                mac[0] ^ 0x02,
+                mac[1],
+                mac[2],
+                0xFF,
+                0xFE,
+                mac[3],
+                mac[4],
+                mac[5],
+            ];
+        }
+
+        let mut fallback = [0u8; 8];
+        fallback.copy_from_slice(&self.session_id.as_bytes()[..8]);
+        fallback[0] &= 0x7f;
+        fallback
+    }
+
     /// Get current state.
     pub fn state(&self) -> SessionState {
         self.state
@@ -263,17 +311,12 @@ impl RtspSession {
         let (timing_peer_info, timing_peer_list) = if self.stream_config.timing_protocol == TimingProtocol::Ptp {
             let addresses = local_addresses.unwrap_or_default();
 
-            let fallback_clock_id = {
-                let mut bytes = [0u8; 8];
-                bytes.copy_from_slice(&self.session_id.as_bytes()[..8]);
-                bytes[0] &= 0x7f;
-                u64::from_be_bytes(bytes)
-            };
+            let sender_clock_id = u64::from_be_bytes(self.sender_clock_identity());
             let peer_info = TimingPeerInfo {
                 addresses,
-                id: self.session_id.to_string(),
+                id: self.client_device_id.replace(':', "").to_uppercase(),
                 device_type: 0,
-                clock_id: timing_clock_id.unwrap_or(fallback_clock_id),
+                clock_id: timing_clock_id.unwrap_or(sender_clock_id),
                 supports_clock_port_matching_override: false,
             };
             let peer_list = vec![peer_info.clone()];
