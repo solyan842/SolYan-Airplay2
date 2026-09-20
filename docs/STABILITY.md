@@ -90,3 +90,21 @@ is part of the stability gate.
 - The GUI executable name is stable: `SolYan-AirPlay2.exe`. Version numbers
   belong in file metadata and release artifact names, reducing repeated Windows
   Firewall prompts caused only by versioned executable paths/names.
+
+
+## PTP timeline ownership (v0.2.19)
+
+Single-speaker native AirPlay 2 uses a persistent sender-owned PTP timeline.
+
+- UDP 319/320 are bound before Session SETUP. Failure to bind is fatal.
+- One 64-bit ClockID is derived per RTSP session and used both in
+  timingPeerInfo/timingPeerList and every PTP packet identity.
+- timingPeerInfo includes DeviceType=0, ClockID, Addresses and
+  SupportsClockPortMatchingOverride=false.
+- SolYan sends SETPEERS with receiver + sender addresses after stream SETUP.
+- The old single-speaker BMCA-yield path is disabled.
+- Sender priority1=246 holds grandmaster against the observed HomePod priority.
+- Sync + Follow_Up are sent unicast every 125ms; Announce refreshes about
+  every 2s; Delay_Req is answered with Delay_Resp.
+- Source silence, track changes and WASAPI recovery do not change the PTP
+  grandmaster or reset RTP sequence/timestamp continuity.

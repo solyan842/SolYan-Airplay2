@@ -19,7 +19,16 @@ use airplay_crypto::keys::SharedSecret;
 use crate::PlaybackState;
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use tracing::{debug, info, warn};
-use airplay_timing::{NtpTimingServer, ClockOffset, PtpMaster, PTP_EVENT_PORT, run_ptp_slave, run_bmca_yield_flow, run_ptp_group_master_flow};
+use airplay_timing::{
+    NtpTimingServer,
+    ClockOffset,
+    PtpMaster,
+    PTP_EVENT_PORT,
+    run_ptp_slave,
+    run_bmca_yield_flow,
+    run_ptp_group_master_flow,
+    run_ptp_hold_master_flow,
+};
 use airplay_core::stream::TimingProtocol;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -216,7 +225,7 @@ pub struct Connection {
     control_receiver: Option<Arc<RtpReceiver>>,
     /// Reverse connection to device's events port (required before RECORD)
     events_stream: Option<TcpStream>,
-    /// Remote PTP master clock identity (from BMCA yield flow)
+    /// Active PTP timeline identity advertised in SETUP and used on wire.
     ptp_master_clock_id: Option<[u8; 8]>,
     /// Render delay in ms added to NTP timestamps for extra retransmit headroom.
     render_delay_ms: u32,
@@ -230,6 +239,15 @@ pub struct Connection {
     spatial_speakers: Option<Vec<SpeakerConfig>>,
     /// Stream statistics (shared with control channel threads).
     stream_stats: Arc<crate::stats::StreamStats>,
+}
+
+fn session_clock_identity(session: &RtspSession) -> [u8; 8] {
+    let session_id = session.id();
+    let mut id = [0u8; 8];
+    id.copy_from_slice(&session_id.as_bytes()[..8]);
+    // Keep ClockID positive for plist implementations using signed int64.
+    id[0] &= 0x7f;
+    id
 }
 
 impl Connection {
@@ -741,7 +759,12 @@ impl Connection {
             self.stream_config.timing_protocol
         );
 
-        // Start timing server based on protocol
+        // Resolve the receiver before timing setup. Native AP2 PTP must be
+        // alive before Session SETUP advertises its clock.
+        let addr = *select_best_address(&self.device.addresses)
+            .ok_or_else(|| RtspError::ConnectionRefused)?;
+
+        // Start timing server based on protocol.
         let local_timing_port = match self.stream_config.timing_protocol {
             TimingProtocol::Ntp => {
                 // For NTP, we run a server that the receiver can sync to
@@ -754,15 +777,54 @@ impl Connection {
                 port
             }
             TimingProtocol::Ptp => {
-                // PTP mode determines whether sender is master (sends Sync) or slave (receives Sync).
-                // Master mode: for third-party receivers like Shairport-sync
-                // Slave mode: for HomePod multi-room where HomePod is the timing master
-                let mode_str = match self.stream_config.ptp_mode {
-                    airplay_core::PtpMode::Master => "master (sender is timing reference)",
-                    airplay_core::PtpMode::Slave => "slave (receiver is timing reference)",
-                };
-                tracing::info!("PTP timing: will act as {}", mode_str);
-                PTP_EVENT_PORT
+                match self.stream_config.ptp_mode {
+                    airplay_core::PtpMode::Master => {
+                        let clock_identity = session_clock_identity(&self.session);
+                        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+
+                        self.ptp_master_clock_id = Some(clock_identity);
+                        self.ptp_master_sync_task = Some(tokio::spawn(
+                            run_ptp_hold_master_flow(
+                                vec![addr],
+                                246,
+                                clock_identity,
+                                ready_tx,
+                            )
+                        ));
+
+                        let (_clock_id, event_port, general_port) =
+                            tokio::time::timeout(
+                                std::time::Duration::from_secs(2),
+                                ready_rx,
+                            )
+                            .await
+                            .map_err(|_| CoreError::Timeout)?
+                            .map_err(|_| CoreError::Rtsp(RtspError::SetupFailed(
+                                "PTP hold-master exited before socket readiness".into()
+                            )))?;
+
+                        if event_port != PTP_EVENT_PORT {
+                            return Err(CoreError::Rtsp(RtspError::SetupFailed(format!(
+                                "PTP event port mismatch: expected {}, bound {}",
+                                PTP_EVENT_PORT, event_port
+                            ))));
+                        }
+
+                        tracing::info!(
+                            "PTP hold-grandmaster ready: clock_id={:02x?}, event={}, general={}",
+                            clock_identity, event_port, general_port
+                        );
+
+                        self.timing_offset = Some(ClockOffset::default());
+                        event_port
+                    }
+                    airplay_core::PtpMode::Slave => {
+                        tracing::info!(
+                            "PTP timing: receiver is timing reference (legacy slave path)"
+                        );
+                        PTP_EVENT_PORT
+                    }
+                }
             }
         };
 
@@ -770,7 +832,12 @@ impl Connection {
         let local_addresses = self.rtsp.local_addr()
             .map(|sa| vec![sa.ip().to_string()])
             .unwrap_or_default();
-        let setup1_body = self.session.build_setup_phase1(local_timing_port, Some(local_addresses))?;
+        let timing_clock_id = self.ptp_master_clock_id.map(u64::from_be_bytes);
+        let setup1_body = self.session.build_setup_phase1_with_clock(
+            local_timing_port,
+            Some(local_addresses),
+            timing_clock_id,
+        )?;
         tracing::debug!(
             uri = %self.session.request_uri(),
             body_len = setup1_body.len(),
@@ -796,10 +863,7 @@ impl Connection {
             .unwrap_or_else(|| "1".to_string());
         self.rtsp.add_session_header("Session", session_id);
 
-        // Get device address and ports from SETUP phase 1 response
-        // Copy the address value to avoid borrow conflict with later mutable calls
-        let addr = *select_best_address(&self.device.addresses)
-            .ok_or_else(|| RtspError::ConnectionRefused)?;
+        // Get receiver ports from SETUP phase 1 response.
         let ports = self.session.ports()
             .ok_or_else(|| CoreError::Rtsp(RtspError::InvalidResponse("No ports in SETUP response".into())))?;
         // Extract port values to avoid borrowing self.session during later mutable calls
@@ -870,19 +934,22 @@ impl Connection {
         }
         self.session.process_setup_phase2_response(setup2_resp.body.as_deref().unwrap_or(&[]))?;
 
-        // SETPEERS disabled — not needed for current receiver targets
-        // let local_addr_str = self.rtsp.local_addr()
-        //     .map(|sa| sa.ip().to_string())
-        //     .unwrap_or_else(|| "0.0.0.0".to_string());
-        // let device_addr_str = addr.to_string();
-        // {
-        //     let peer_addresses = vec![device_addr_str, local_addr_str];
-        //     tracing::debug!("Sending SETPEERS with addresses: {:?}", peer_addresses);
-        //     match self.send_setpeers(&peer_addresses).await {
-        //         Ok(()) => tracing::info!("SETPEERS sent"),
-        //         Err(e) => warn!("SETPEERS failed (continuing anyway): {}", e),
-        //     }
-        // }
+        if self.stream_config.timing_protocol == TimingProtocol::Ptp
+            && self.stream_config.ptp_mode == airplay_core::PtpMode::Master
+        {
+            let local_addr_str = self.rtsp.local_addr()
+                .map(|sa| sa.ip().to_string())
+                .ok_or_else(|| CoreError::Rtsp(RtspError::SetupFailed(
+                    "missing local RTSP address for SETPEERS".into()
+                )))?;
+            let peer_addresses = vec![addr.to_string(), local_addr_str];
+            tracing::info!(
+                "Sending SETPEERS for fixed PTP timeline: {:?}",
+                peer_addresses
+            );
+            self.send_setpeers(&peer_addresses).await?;
+            tracing::info!("SETPEERS acknowledged");
+        }
 
         // Timing sync - after stream is set up
         match self.stream_config.timing_protocol {
@@ -896,69 +963,13 @@ impl Connection {
             TimingProtocol::Ptp => {
                 match self.stream_config.ptp_mode {
                     airplay_core::PtpMode::Master => {
-                        // BMCA yield flow: act like a Mac sender
-                        // 1. Send 3 Syncs + Announces with Priority1=250
-                        // 2. HomePod wins BMCA (Priority1=248 < 250)
-                        // 3. We yield and become slave
-                        // 4. Receive Sync/Follow_Up from HomePod, calculate offset
-                        let (offset_tx, mut offset_rx) = watch::channel(ClockOffset::default());
-                        self.timing_tx = Some(offset_tx.clone());
-
-                        // Oneshot channel to receive HomePod's clock identity from BMCA
-                        let (clock_id_tx, clock_id_rx) = tokio::sync::oneshot::channel::<[u8; 8]>();
-
-                        let master_ip = addr;
-                        self.ptp_master_sync_task = Some(tokio::spawn(async move {
-                            if let Err(e) = run_bmca_yield_flow(
-                                master_ip,
-                                250,  // Priority1=250 (Mac's value, loses to HomePod's 248)
-                                offset_tx,
-                                clock_id_tx,
-                            ).await {
-                                tracing::error!("BMCA yield flow error: {}", e);
-                            }
-                        }));
-
-                        // Wait for BMCA to complete and get HomePod's clock identity
-                        match tokio::time::timeout(
-                            std::time::Duration::from_secs(5),
-                            clock_id_rx,
-                        ).await {
-                            Ok(Ok(clock_id)) => {
-                                self.ptp_master_clock_id = Some(clock_id);
-                                tracing::info!("BMCA complete: HomePod clock ID = {:02x?}", clock_id);
-                            }
-                            Ok(Err(_)) => {
-                                tracing::warn!("BMCA: clock ID channel closed unexpectedly");
-                            }
-                            Err(_) => {
-                                tracing::warn!("BMCA: timeout waiting for clock ID (5s)");
-                            }
-                        }
-
-                        // Wait for first real clock offset from BMCA slave loop.
-                        // The slave loop needs a full Sync/Follow_Up/Delay_Req/Delay_Resp
-                        // exchange (~1-2s) before it can calculate the offset. A blind 500ms
-                        // sleep often reads zero, causing group sync packets to use wrong timestamps.
-                        match tokio::time::timeout(
-                            std::time::Duration::from_secs(5),
-                            offset_rx.changed(),
-                        ).await {
-                            Ok(Ok(())) => {
-                                tracing::info!("BMCA: First clock offset received from slave loop");
-                            }
-                            Ok(Err(_)) => {
-                                tracing::warn!("BMCA: offset channel closed before first offset");
-                            }
-                            Err(_) => {
-                                tracing::warn!("BMCA: Timeout waiting for first clock offset (5s), using zero");
-                            }
-                        }
-                        let initial_offset = *offset_rx.borrow_and_update();
-                        self.timing_offset = Some(initial_offset);
-
-                        tracing::info!("gPTP BMCA initialized (offset: {} ns, clock_id: {:02x?})",
-                            initial_offset.offset_ns, self.ptp_master_clock_id);
+                        // Fixed-clock hold-grandmaster started before Session SETUP.
+                        // Never yield the timeline mid-session.
+                        self.timing_offset = Some(ClockOffset::default());
+                        tracing::info!(
+                            "PTP hold-grandmaster active for session clock {:02x?}",
+                            self.ptp_master_clock_id
+                        );
                     }
                     airplay_core::PtpMode::Slave => {
                         // Slave mode: Receiver (HomePod) is the timing master
@@ -1696,7 +1707,13 @@ impl Connection {
     pub async fn send_setpeers(&mut self, peer_addresses: &[String]) -> Result<()> {
         let setpeers_body = self.session.build_setpeers(peer_addresses)?;
         let setpeers_req = RtspRequest::setpeers(&self.session.id().to_string(), setpeers_body);
-        self.rtsp.send(setpeers_req).await?;
+        let resp = self.rtsp.send(setpeers_req).await?;
+        if resp.status_code != 200 {
+            return Err(CoreError::Rtsp(RtspError::SetupFailed(format!(
+                "SETPEERS returned HTTP {}",
+                resp.status_code
+            ))));
+        }
         Ok(())
     }
 
