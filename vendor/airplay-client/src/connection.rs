@@ -1314,6 +1314,24 @@ impl Connection {
             streamer.set_timing_offset(offset).await;
         }
 
+        // Native AP2 live streaming must use the same PTP clock identity that
+        // Session SETUP advertised. The file-decoder path already did this;
+        // the WASAPI/live path previously omitted it and could therefore keep
+        // sending audio while the receiver lost the render timeline.
+        if self.stream_config.timing_protocol == TimingProtocol::Ptp {
+            if let Some(clock_id) = self.ptp_master_clock_id {
+                streamer.set_ptp_sync_mode(clock_id).await;
+                tracing::info!(
+                    "Live streaming: PTP RTP-sync enabled with clock_id={:02x?}",
+                    clock_id
+                );
+            } else {
+                return Err(CoreError::Rtsp(RtspError::SetupFailed(
+                    "PTP live stream has no active timeline ClockID".into(),
+                )));
+            }
+        }
+
         // Set up equalizer if configured
         if let (Some(config), Some(params)) = (self.eq_config.take(), self.eq_params.clone()) {
             streamer.set_eq_params(config, params).await;
