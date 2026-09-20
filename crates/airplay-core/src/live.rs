@@ -253,6 +253,10 @@ pub async fn run_live_stream(
     // The AirPlay streamer already has hundreds of milliseconds of PCM runway.
     // Do not fade to synthetic silence for ordinary scheduler hiccups.
     const SILENCE_GRACE: Duration = Duration::from_millis(350);
+    // If Windows produces no real PCM for this long, pre-arm a warm RTP->PTP
+    // timeline re-anchor. This is long enough to ignore scheduler jitter but
+    // short enough to cover app/player switches that previously left HomePod mute.
+    const WARM_REANCHOR_SILENCE: Duration = Duration::from_secs(2);
     const STARTUP_PRIME_MS: u64 = 450;
     const FEEDBACK_DEGRADED_MISSES: u32 = 3;
     const CAPTURE_RESTART_ATTEMPTS: usize = 6;
@@ -355,12 +359,21 @@ pub async fn run_live_stream(
                     .unwrap_or(0);
 
                 if in_silence {
+                    let silent_for = silence_started_at.map(|t| t.elapsed());
                     fade_in_from_zero(
                         &mut samples,
                         chunk.channels as usize,
                         transition_frames,
                     );
                     in_silence = false;
+                    silence_started_at = None;
+                    if warm_reanchor_armed {
+                        tracing::info!(
+                            "Real PCM resumed after {:.0} ms silence; warm timeline re-anchor was armed",
+                            silent_for.unwrap_or_default().as_secs_f64() * 1000.0
+                        );
+                    }
+                    warm_reanchor_armed = false;
                     silence_transitions += 1;
                 }
 
@@ -545,6 +558,12 @@ pub async fn run_live_stream(
     let mut loss_percent = 0.0f64;
     let mut capture_restarts = 0u64;
     let mut loop_error: Option<anyhow::Error> = None;
+    let mut silence_started_at = if in_silence {
+        Some(Instant::now())
+    } else {
+        None
+    };
+    let mut warm_reanchor_armed = false;
 
     while !control.is_stopped() {
         if feedback_fatal.load(Ordering::Acquire) {
@@ -580,7 +599,10 @@ pub async fn run_live_stream(
                         in_silence = true;
                         last_real_at = None;
                         last_samples.fill(0);
-                        next_silence_at = Instant::now() + silence_chunk_period;
+                        let now = Instant::now();
+                        silence_started_at = Some(now);
+                        warm_reanchor_armed = false;
+                        next_silence_at = now + silence_chunk_period;
                         tracing::info!(
                             "WASAPI recovery complete; AirPlay session preserved (restart #{})",
                             capture_restarts
@@ -684,6 +706,8 @@ pub async fn run_live_stream(
                             silence_chunks += 1;
                             silence_transitions += 1;
                             in_silence = true;
+                            silence_started_at = Some(now);
+                            warm_reanchor_armed = false;
                             last_samples.fill(0);
                             next_silence_at = now + silence_chunk_period;
                         }
@@ -710,6 +734,30 @@ pub async fn run_live_stream(
             }
         }
 
+        // Long source silence used to leave some native AP2 receivers connected
+        // but no longer rendering when real PCM returned. Arm a lock-free warm
+        // re-anchor while silence is still flowing, so the streamer rebuilds
+        // RTP->PTP mapping and forces an immediate sync packet without any
+        // FLUSH/RECORD/reconnect.
+        if in_silence && !warm_reanchor_armed {
+            let silence_long_enough = silence_started_at
+                .map(|t| t.elapsed() >= WARM_REANCHOR_SILENCE)
+                .unwrap_or(false);
+
+            if silence_long_enough {
+                if let Ok(guard) = client.try_lock() {
+                    if guard.request_live_timeline_reanchor() {
+                        warm_reanchor_armed = true;
+                        tracing::warn!(
+                            "Warm timeline re-anchor armed after {:.0} ms source silence",
+                            silence_started_at
+                                .map(|t| t.elapsed().as_secs_f64() * 1000.0)
+                                .unwrap_or_default()
+                        );
+                    }
+                }
+            }
+        }
 
         let desired_volume = control.volume();
         if (desired_volume - applied_volume).abs() > 0.005 {
