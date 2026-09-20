@@ -158,6 +158,30 @@ async fn discover_targets(
     }
 }
 
+fn os_major(version: Option<&str>) -> Option<u32> {
+    version?
+        .split(|ch: char| !ch.is_ascii_digit())
+        .find(|part| !part.is_empty())?
+        .parse()
+        .ok()
+}
+
+fn should_follow_receiver_clock(device: &Device) -> bool {
+    let is_homepod = device
+        .model
+        .to_ascii_lowercase()
+        .starts_with("audioaccessory");
+    let os27_or_newer = os_major(device.os_version.as_deref())
+        .map(|major| major >= 27)
+        .unwrap_or(false);
+
+    is_homepod
+        && os27_or_newer
+        && device.is_group_leader
+        && device.parent_group_id.is_none()
+        && device.tight_sync_id.is_none()
+}
+
 fn validate_capture_format(capture: &CaptureHandle, expected_rate: Option<u32>) -> Result<()> {
     if capture.format.channels != 2 || capture.format.bits_per_sample != 16 {
         bail!(
@@ -269,12 +293,39 @@ pub async fn run_live_stream(
         stream_config.latency_max = 11_025; // ≈250ms
     }
 
+    // Discovery must happen before final timing-route selection because
+    // standalone HomePod OS 27 follows a different gPTP clock ownership model.
+    let discovery_client = AirPlayClient::new()?;
+    let targets =
+        discover_targets(&discovery_client, &selectors, mode, Duration::from_secs(4)).await?;
+    let target_names = targets.iter().map(|d| d.name.clone()).collect::<Vec<_>>();
+
+    if mode == LiveStreamMode::Single && should_follow_receiver_clock(&targets[0]) {
+        stream_config.ptp_mode = airplay2_core::PtpMode::Slave;
+        tracing::warn!(
+            "Timing route: FOLLOW RECEIVER CLOCK — name={}, model={}, osvers={}, igl={}, pgid={:?}, tsid={:?}",
+            targets[0].name,
+            targets[0].model,
+            targets[0].os_version.as_deref().unwrap_or("unknown"),
+            targets[0].is_group_leader,
+            targets[0].parent_group_id,
+            targets[0].tight_sync_id
+        );
+    } else if mode == LiveStreamMode::Single {
+        stream_config.ptp_mode = airplay2_core::PtpMode::Master;
+        tracing::info!(
+            "Timing route: SENDER GRANDMASTER — name={}, model={}, osvers={}, igl={}, pgid={:?}, tsid={:?}",
+            targets[0].name,
+            targets[0].model,
+            targets[0].os_version.as_deref().unwrap_or("unknown"),
+            targets[0].is_group_leader,
+            targets[0].parent_group_id,
+            targets[0].tight_sync_id
+        );
+    }
+
     let mut client = AirPlayClient::with_config(stream_config, None)?;
     client.set_render_delay_ms(render_delay_ms);
-
-    let targets =
-        discover_targets(&client, &selectors, mode, Duration::from_secs(4)).await?;
-    let target_names = targets.iter().map(|d| d.name.clone()).collect::<Vec<_>>();
 
     match mode {
         LiveStreamMode::Single => {
