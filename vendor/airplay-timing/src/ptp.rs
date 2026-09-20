@@ -15,16 +15,32 @@ pub const PTP_EVENT_PORT: u16 = 319;
 /// PTP general port (IEEE 1588).
 pub const PTP_GENERAL_PORT: u16 = 320;
 
+const PTP_FLAG_TWO_STEP: u16 = 0x0200;
+const PTP_FLAG_UNICAST: u16 = 0x0400;
+const PTP_FLAG_PTP_TIMESCALE: u16 = 0x0008;
+const AIRPLAY_PTP_PORT_NUMBER: u16 = 0x8005;
+const AIRPLAY_PRIORITY1: u8 = 128;
+const AIRPLAY_PRIORITY2: u8 = 128;
+const AIRPLAY_CLOCK_CLASS: u8 = 6;
+const AIRPLAY_CLOCK_ACCURACY: u8 = 0x21;
+const AIRPLAY_LOG_VARIANCE: u16 = 0x436A;
+const AIRPLAY_TIME_SOURCE: u8 = 0x20;
+const AIRPLAY_SYNC_LOG_INTERVAL: i8 = -3;
+const AIRPLAY_ANNOUNCE_LOG_INTERVAL: i8 = 0;
+
 /// PTP message types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum PtpMessageType {
     Sync = 0x00,
     DelayReq = 0x01,
+    PdelayReq = 0x02,
+    PdelayResp = 0x03,
     FollowUp = 0x08,
     DelayResp = 0x09,
+    PdelayRespFollowUp = 0x0A,
     Announce = 0x0B,
-    Signaling = 0x0C,  // gPTP (802.1AS) signaling
+    Signaling = 0x0C,
 }
 
 impl PtpMessageType {
@@ -33,8 +49,11 @@ impl PtpMessageType {
         match b & 0x0F {
             0x00 => Some(Self::Sync),
             0x01 => Some(Self::DelayReq),
+            0x02 => Some(Self::PdelayReq),
+            0x03 => Some(Self::PdelayResp),
             0x08 => Some(Self::FollowUp),
             0x09 => Some(Self::DelayResp),
+            0x0A => Some(Self::PdelayRespFollowUp),
             0x0B => Some(Self::Announce),
             0x0C => Some(Self::Signaling),
             _ => None,
@@ -356,10 +375,13 @@ impl PtpHeader {
             control_field: match message_type {
                 PtpMessageType::Sync => 0,
                 PtpMessageType::DelayReq => 1,
+                PtpMessageType::PdelayReq => 5,
+                PtpMessageType::PdelayResp => 5,
                 PtpMessageType::FollowUp => 2,
                 PtpMessageType::DelayResp => 3,
+                PtpMessageType::PdelayRespFollowUp => 5,
                 PtpMessageType::Announce => 5,
-                PtpMessageType::Signaling => 5,  // gPTP uses 5 for Signaling
+                PtpMessageType::Signaling => 5,
             },
             log_message_interval: 0,
         }
@@ -369,7 +391,9 @@ impl PtpHeader {
     pub fn serialize(&self) -> [u8; 34] {
         let mut buf = [0u8; 34];
 
-        buf[0] = self.message_type as u8;
+        // AirPlay 2 timing uses the IEEE 802.1AS/gPTP profile.
+        // majorSdoId=1 is carried in the high nibble of byte 0.
+        buf[0] = 0x10 | (self.message_type as u8 & 0x0F);
         buf[1] = self.version;
         buf[2..4].copy_from_slice(&self.message_length.to_be_bytes());
         buf[4] = self.domain_number;
@@ -1043,6 +1067,21 @@ impl Default for PtpMaster {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn airplay_source_port_identity(clock_identity: &[u8; 8]) -> [u8; 10] {
+    let mut source = [0u8; 10];
+    source[..8].copy_from_slice(clock_identity);
+    source[8..10].copy_from_slice(&AIRPLAY_PTP_PORT_NUMBER.to_be_bytes());
+    source
+}
+
+fn read_correction_ns(data: &[u8]) -> i64 {
+    if data.len() < 16 {
+        return 0;
+    }
+    let raw = i64::from_be_bytes(data[8..16].try_into().unwrap());
+    raw / 65_536
 }
 
 /// Send a PTP Announce message to a destination.
