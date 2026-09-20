@@ -1,0 +1,27 @@
+[package]
+name = "airplay-rtsp"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/lmcgartland/airplay2-rs"
+description = "RTSP protocol implementation for AirPlay 2 (SolYan stability patch)"
+
+[dependencies]
+airplay-core = { git = "https://github.com/lmcgartland/airplay2-rs", rev = "a2f980cf25bf13ae20158497cc2d2ea69cd88fa7" }
+airplay-crypto = { git = "https://github.com/lmcgartland/airplay2-rs", rev = "a2f980cf25bf13ae20158497cc2d2ea69cd88fa7" }
+airplay-pairing = { git = "https://github.com/lmcgartland/airplay2-rs", rev = "a2f980cf25bf13ae20158497cc2d2ea69cd88fa7" }
+tokio = { version = "1.37", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+plist = "1.6"
+uuid = { version = "1.8", features = ["v4", "serde"] }
+tracing = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_bytes = "0.11"
+rand = "0.8"
+base64 = "0.22"
+
+[dev-dependencies]
+tokio-test = "0.4"
+mockall = "0.12"
+test-case = "3.3"
