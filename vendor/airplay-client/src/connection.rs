@@ -1505,6 +1505,26 @@ impl Connection {
         self.streamer.as_ref().map_or(0, |s| s.underruns())
     }
 
+    /// Arm a warm RTP->PTP/NTP timeline re-anchor on the next packet.
+    ///
+    /// Returns false when no streamer is active. This does not FLUSH/RECORD,
+    /// reconnect, reset RTP sequence/timestamp or replace session crypto.
+    pub fn request_live_timeline_reanchor(&self) -> bool {
+        if let Some(ref streamer) = self.streamer {
+            streamer.request_timeline_reanchor();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Number of warm timeline re-anchors already applied by the streamer.
+    pub fn timeline_reanchors(&self) -> u64 {
+        self.streamer
+            .as_ref()
+            .map_or(0, |streamer| streamer.timeline_reanchors())
+    }
+
     /// Set render delay in milliseconds.
     ///
     /// Shifts NTP timestamps in sync packets into the future, telling the
