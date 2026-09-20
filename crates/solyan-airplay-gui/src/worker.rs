@@ -20,6 +20,12 @@ pub enum GuiEvent {
     ScanFinished(Result<Vec<AirPlayReceiver>, String>),
     CaptureFinished(Result<CaptureProbe, String>),
     ConnectFinished(Result<SessionTestResult, String>),
+    StreamRecovering {
+        attempt: u32,
+        backoff_ms: u64,
+        reason: String,
+    },
+    StreamStopped,
     StreamFinished(Result<LiveStreamResult, String>),
 }
 
@@ -115,21 +121,63 @@ pub fn spawn_stream(
     std::thread::Builder::new()
         .name("solyan-live-stream".into())
         .spawn(move || {
-            let result = match runtime() {
-                Ok(rt) => rt
-                    .block_on(run_live_stream(
-                        selectors,
-                        mode,
-                        control,
-                        Some(progress_tx),
-                        render_delay_ms,
-                    ))
-                    .map_err(|e| format!("{e:#}")),
-                Err(e) => Err(e),
+            let rt = match runtime() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = tx.send(GuiEvent::StreamFinished(Err(e)));
+                    ctx.request_repaint();
+                    return;
+                }
             };
 
-            let _ = tx.send(GuiEvent::StreamFinished(result));
-            ctx.request_repaint();
+            let mut recovery_attempt = 0u32;
+            loop {
+                let result = rt
+                    .block_on(run_live_stream(
+                        selectors.clone(),
+                        mode,
+                        control.clone(),
+                        Some(progress_tx.clone()),
+                        render_delay_ms,
+                    ))
+                    .map_err(|e| format!("{e:#}"));
+
+                if control.is_stopped() {
+                    let _ = tx.send(GuiEvent::StreamFinished(result));
+                    ctx.request_repaint();
+                    break;
+                }
+
+                recovery_attempt = recovery_attempt.saturating_add(1);
+                let reason = match &result {
+                    Ok(info) => format!(
+                        "stream exited unexpectedly after {:.1}s",
+                        info.elapsed.as_secs_f64()
+                    ),
+                    Err(error) => error.clone(),
+                };
+
+                let backoff_ms = match recovery_attempt {
+                    1 => 250,
+                    2 => 500,
+                    3 => 1000,
+                    _ => 2000,
+                };
+
+                let _ = tx.send(GuiEvent::StreamRecovering {
+                    attempt: recovery_attempt,
+                    backoff_ms,
+                    reason,
+                });
+                ctx.request_repaint();
+
+                std::thread::sleep(Duration::from_millis(backoff_ms));
+                if control.is_stopped() {
+                    let _ = tx.send(GuiEvent::StreamStopped);
+                    ctx.request_repaint();
+                    break;
+                }
+            }
         })
         .ok();
 }
