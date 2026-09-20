@@ -25,7 +25,6 @@ use airplay_timing::{
     PtpMaster,
     PTP_EVENT_PORT,
     run_ptp_slave,
-    run_bmca_yield_flow,
     run_ptp_group_master_flow,
     run_ptp_hold_master_flow,
 };
@@ -783,14 +782,18 @@ impl Connection {
                         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
 
                         self.ptp_master_clock_id = Some(clock_identity);
-                        self.ptp_master_sync_task = Some(tokio::spawn(
-                            run_ptp_hold_master_flow(
+                        self.ptp_master_sync_task = Some(tokio::spawn(async move {
+                            if let Err(err) = run_ptp_hold_master_flow(
                                 vec![addr],
                                 246,
                                 clock_identity,
                                 ready_tx,
                             )
-                        ));
+                            .await
+                            {
+                                tracing::error!("PTP hold-master task error: {}", err);
+                            }
+                        }));
 
                         let (_clock_id, event_port, general_port) =
                             tokio::time::timeout(
