@@ -6,7 +6,7 @@ use crate::encoder::{create_encoder, AudioEncoder};
 use crate::eq::{EqConfig, EqParams, Equalizer};
 use crate::spatial::{SpatialMixer, SpatialParams, SpatialSnapshot, SpeakerConfig, Position};
 use airplay_timing::{Clock, ClockOffset, unix_to_ntp};
-use std::sync::{Arc, atomic::{AtomicU64, AtomicU8, Ordering}};
+use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering}};
 use tokio::sync::{Mutex, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration, Instant};
@@ -457,6 +457,11 @@ pub struct AudioStreamer {
     packets_sent: Arc<AtomicU64>,
     /// Buffer underruns: times the buffer was empty when a packet was due.
     underruns: Arc<AtomicU64>,
+    /// Lock-free request to rebuild only the RTP->wall-clock anchor on the
+    /// next packet. RTP sequence/timestamp, crypto and RTSP session survive.
+    timeline_reanchor_requested: Arc<AtomicBool>,
+    /// Number of warm timeline re-anchors applied by the streaming task.
+    timeline_reanchors: Arc<AtomicU64>,
     /// Dedicated sender thread for precise packet timing.
     sender_thread: Option<std::thread::JoinHandle<()>>,
     /// Channel to send packets to the sender thread.
@@ -472,6 +477,8 @@ impl Clone for AudioStreamer {
             timestamp_cache: Arc::clone(&self.timestamp_cache),
             packets_sent: Arc::clone(&self.packets_sent),
             underruns: Arc::clone(&self.underruns),
+            timeline_reanchor_requested: Arc::clone(&self.timeline_reanchor_requested),
+            timeline_reanchors: Arc::clone(&self.timeline_reanchors),
             sender_thread: None, // Can't clone JoinHandle
             sender_tx: self.sender_tx.clone(),
         }
@@ -514,6 +521,8 @@ impl AudioStreamer {
             timestamp_cache: Arc::new(AtomicU64::new(0)),
             packets_sent: Arc::new(AtomicU64::new(0)),
             underruns: Arc::new(AtomicU64::new(0)),
+            timeline_reanchor_requested: Arc::new(AtomicBool::new(false)),
+            timeline_reanchors: Arc::new(AtomicU64::new(0)),
             sender_thread: None,
             sender_tx: None,
         }
@@ -634,6 +643,20 @@ impl AudioStreamer {
         self.underruns.load(Ordering::Relaxed)
     }
 
+    /// Ask the streaming task to rebuild only its RTP->wall-clock anchor on
+    /// the next packet and force an immediate sync packet.
+    ///
+    /// This intentionally does NOT reset RTP sequence/timestamp, first-packet
+    /// marker state, sender crypto, RTSP state or the PTP clock identity.
+    pub fn request_timeline_reanchor(&self) {
+        self.timeline_reanchor_requested.store(true, Ordering::Release);
+    }
+
+    /// Number of warm timeline re-anchors applied by this streamer.
+    pub fn timeline_reanchors(&self) -> u64 {
+        self.timeline_reanchors.load(Ordering::Relaxed)
+    }
+
     /// Get current state.
     pub fn state(&self) -> StreamerState {
         match self.state_cache.load(Ordering::Relaxed) {
@@ -723,9 +746,20 @@ impl AudioStreamer {
             let timestamp_cache = self.timestamp_cache.clone();
             let packets_sent = self.packets_sent.clone();
             let underruns = self.underruns.clone();
+            let timeline_reanchor_requested = self.timeline_reanchor_requested.clone();
+            let timeline_reanchors = self.timeline_reanchors.clone();
             let sender_tx = self.sender_tx.clone();
             self.task = Some(tokio::spawn(async move {
-                match run_streamer(inner.clone(), state_cache.clone(), timestamp_cache, packets_sent, underruns, sender_tx).await {
+                match run_streamer(
+                    inner.clone(),
+                    state_cache.clone(),
+                    timestamp_cache,
+                    packets_sent,
+                    underruns,
+                    timeline_reanchor_requested,
+                    timeline_reanchors,
+                    sender_tx,
+                ).await {
                     Ok(()) => tracing::debug!("Streaming task completed normally"),
                     Err(e) => {
                         tracing::error!("Streaming task error: {}", e);
@@ -860,9 +894,20 @@ impl AudioStreamer {
             let timestamp_cache = self.timestamp_cache.clone();
             let packets_sent = self.packets_sent.clone();
             let underruns = self.underruns.clone();
+            let timeline_reanchor_requested = self.timeline_reanchor_requested.clone();
+            let timeline_reanchors = self.timeline_reanchors.clone();
             let sender_tx = self.sender_tx.clone();
             self.task = Some(tokio::spawn(async move {
-                match run_streamer(inner.clone(), state_cache.clone(), timestamp_cache, packets_sent, underruns, sender_tx).await {
+                match run_streamer(
+                    inner.clone(),
+                    state_cache.clone(),
+                    timestamp_cache,
+                    packets_sent,
+                    underruns,
+                    timeline_reanchor_requested,
+                    timeline_reanchors,
+                    sender_tx,
+                ).await {
                     Ok(()) => tracing::debug!("Live streaming task completed normally"),
                     Err(e) => {
                         tracing::error!("Live streaming task error: {}", e);
@@ -1052,6 +1097,8 @@ async fn run_streamer(
     timestamp_cache: Arc<AtomicU64>,
     packets_sent_counter: Arc<AtomicU64>,
     underrun_counter: Arc<AtomicU64>,
+    timeline_reanchor_requested: Arc<AtomicBool>,
+    timeline_reanchors: Arc<AtomicU64>,
     sender_tx: Option<Sender<SenderMessage>>,
 ) -> Result<()> {
     // Compute frame duration once (constant for the session)
@@ -1328,10 +1375,25 @@ async fn run_streamer(
                     local_wall
                 };
 
-                // Build one stable RTP -> NTP timeline. The previous code
-                // remapped each periodic sync packet to scheduler "now", so any
-                // change in decoder/buffer depth could move the receiver timeline
-                // by a few milliseconds and produce an audible tick.
+                // A long source-silence watchdog may request a warm re-anchor.
+                // Rebuild only the RTP->wall-clock mapping and force the next
+                // sync packet. Do not touch RTP sequence/timestamp, marker state,
+                // sender crypto, RTSP session or PTP clock identity.
+                if timeline_reanchor_requested.swap(false, Ordering::AcqRel) {
+                    guard.sync_anchor_timestamp = None;
+                    guard.sync_anchor_wall_ns = None;
+                    guard.last_sync_rtp = 0;
+                    let count = timeline_reanchors.fetch_add(1, Ordering::Relaxed) + 1;
+                    tracing::warn!(
+                        "Warm timeline re-anchor #{} requested at rtp={} wall_ns={} (session continuity preserved)",
+                        count,
+                        packet_timestamp,
+                        adjusted + guard.render_delay_ns
+                    );
+                }
+
+                // Build one stable RTP -> NTP/PTP timeline. Periodic sync must
+                // advance from RTP sample time, not scheduler "now".
                 if guard.sync_anchor_timestamp.is_none() {
                     guard.sync_anchor_timestamp = Some(packet_timestamp);
                     guard.sync_anchor_wall_ns = Some(adjusted + guard.render_delay_ns);
