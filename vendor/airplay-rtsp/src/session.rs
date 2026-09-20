@@ -44,6 +44,8 @@ pub struct SessionPorts {
 /// Active RTSP session with a receiver.
 pub struct RtspSession {
     session_id: Uuid,
+    /// Per-session timing peer UUID. This is not the PTP ClockID.
+    timing_peer_id: Uuid,
     group_uuid: Uuid,
     state: SessionState,
     device: Device,
@@ -90,6 +92,7 @@ impl RtspSession {
 
         Self {
             session_id: Uuid::new_v4(),
+            timing_peer_id: Uuid::new_v4(),
             group_uuid: device.group_id.unwrap_or_else(Uuid::new_v4),
             state: SessionState::Disconnected,
             device,
@@ -314,7 +317,7 @@ impl RtspSession {
             let sender_clock_id = u64::from_be_bytes(self.sender_clock_identity());
             let peer_info = TimingPeerInfo {
                 addresses,
-                id: self.client_device_id.replace(':', "").to_uppercase(),
+                id: self.timing_peer_id.to_string().to_uppercase(),
                 device_type: 0,
                 clock_id: timing_clock_id.unwrap_or(sender_clock_id),
                 supports_clock_port_matching_override: false,
