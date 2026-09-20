@@ -1703,14 +1703,15 @@ impl Connection {
     /// AirPlay 2 receivers expect periodic feedback requests (~every 2 seconds).
     /// Call this from your playback loop to maintain the session.
     pub async fn send_feedback(&mut self) -> Result<()> {
-        let uri = self.session.request_uri();
-        let req = RtspRequest::feedback(uri);
-        let resp = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            self.rtsp.send(req),
-        )
-        .await
-        .map_err(|_| CoreError::Timeout)??;
+        let req = RtspRequest::feedback();
+
+        // Do NOT wrap the RTSP exchange in a shorter cancellable timeout.
+        // Cancelling an encrypted HAP response mid-frame can leave the next
+        // read starting in the middle of that frame. The RTSP transport owns
+        // its read deadline and finishes/fails the exchange atomically.
+        //
+        // Feedback runs on a separate task, so this can never starve PCM/RTP.
+        let resp = self.rtsp.send(req).await?;
 
         if resp.status_code != 200 {
             return Err(CoreError::Rtsp(RtspError::UnexpectedStatus(resp.status_code)));
