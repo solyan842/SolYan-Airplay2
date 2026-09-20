@@ -7,7 +7,7 @@ on:
     branches: ["stable/**"]
 
 concurrency:
-  group: solyan-v0222-${{ github.ref }}
+  group: solyan-v030-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
