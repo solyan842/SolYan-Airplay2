@@ -24,9 +24,10 @@ use airplay_timing::{
     ClockOffset,
     PtpMaster,
     PTP_EVENT_PORT,
-    run_ptp_slave,
+    FollowClockState,
     run_ptp_group_master_flow,
     run_ptp_hold_master_flow,
+    run_ptp_follow_receiver_flow,
 };
 use airplay_core::stream::TimingProtocol;
 use tokio::sync::watch;
@@ -812,6 +813,10 @@ impl Connection {
         let addr = *select_best_address(&self.device.addresses)
             .ok_or_else(|| RtspError::ConnectionRefused)?;
 
+        // Follow-mode needs to retain the learned receiver clock across the
+        // two SETUP phases without exposing partially-locked state elsewhere.
+        let mut follow_state_rx: Option<watch::Receiver<FollowClockState>> = None;
+
         // Start timing server based on protocol.
         let local_timing_port = match self.stream_config.timing_protocol {
             TimingProtocol::Ntp => {
@@ -871,10 +876,53 @@ impl Connection {
                         event_port
                     }
                     airplay_core::PtpMode::Slave => {
+                        let sender_clock_identity = session_clock_identity(&self.session);
+                        let (state_tx, state_rx) = watch::channel(FollowClockState::default());
+                        let (offset_tx, _) = watch::channel(ClockOffset::default());
+                        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+
+                        self.timing_tx = Some(offset_tx.clone());
+                        self.timing_task = Some(tokio::spawn(async move {
+                            if let Err(err) = run_ptp_follow_receiver_flow(
+                                addr,
+                                sender_clock_identity,
+                                state_tx,
+                                offset_tx,
+                                ready_tx,
+                            )
+                            .await
+                            {
+                                tracing::error!("PTP follow-receiver task error: {}", err);
+                            }
+                        }));
+                        follow_state_rx = Some(state_rx);
+
+                        let (event_port, general_port) = tokio::time::timeout(
+                            std::time::Duration::from_secs(2),
+                            ready_rx,
+                        )
+                        .await
+                        .map_err(|_| CoreError::Timeout)?
+                        .map_err(|_| CoreError::Rtsp(RtspError::SetupFailed(
+                            "PTP follow-receiver exited before socket readiness".into(),
+                        )))?;
+
+                        if event_port != PTP_EVENT_PORT || general_port != airplay_timing::PTP_GENERAL_PORT {
+                            return Err(CoreError::Rtsp(RtspError::SetupFailed(format!(
+                                "PTP follow-receiver port mismatch: expected {}/{}, bound {}/{}",
+                                PTP_EVENT_PORT,
+                                airplay_timing::PTP_GENERAL_PORT,
+                                event_port,
+                                general_port
+                            ))));
+                        }
+
                         tracing::info!(
-                            "PTP timing: receiver is timing reference (legacy slave path)"
+                            "PTP follow-receiver sockets ready: event={}, general={}",
+                            event_port,
+                            general_port
                         );
-                        PTP_EVENT_PORT
+                        event_port
                     }
                 }
             }
@@ -986,9 +1034,7 @@ impl Connection {
         }
         self.session.process_setup_phase2_response(setup2_resp.body.as_deref().unwrap_or(&[]))?;
 
-        if self.stream_config.timing_protocol == TimingProtocol::Ptp
-            && self.stream_config.ptp_mode == airplay_core::PtpMode::Master
-        {
+        if self.stream_config.timing_protocol == TimingProtocol::Ptp {
             let local_addr_str = self.rtsp.local_addr()
                 .map(|sa| sa.ip().to_string())
                 .ok_or_else(|| CoreError::Rtsp(RtspError::SetupFailed(
@@ -996,7 +1042,8 @@ impl Connection {
                 )))?;
             let peer_addresses = vec![addr.to_string(), local_addr_str];
             tracing::info!(
-                "Sending SETPEERS for fixed PTP timeline: {:?}",
+                "Sending SETPEERS for PTP timing peers (mode={:?}): {:?}",
+                self.stream_config.ptp_mode,
                 peer_addresses
             );
             self.send_setpeers(&peer_addresses).await?;
@@ -1024,38 +1071,44 @@ impl Connection {
                         );
                     }
                     airplay_core::PtpMode::Slave => {
-                        // Slave mode: Receiver (HomePod) is the timing master
-                        // We listen for Sync/Announce from receiver and calculate offset
+                        // Standalone HomePod OS 27 keeps its own grandmaster.
+                        // Do not proceed until both the receiver's GM identity
+                        // and a real Sync/Follow_Up offset have been observed.
+                        let mut state_rx = follow_state_rx.take().ok_or_else(|| {
+                            CoreError::Rtsp(RtspError::SetupFailed(
+                                "PTP follow-receiver state channel missing".into(),
+                            ))
+                        })?;
 
-                        // Create watch channel for clock offset updates
-                        let (offset_tx, mut offset_rx) = watch::channel(ClockOffset::default());
-
-                        // Store the sender for the streamer to subscribe to
-                        self.timing_tx = Some(offset_tx.clone());
-
-                        // Spawn PTP slave task to listen for Sync/Follow-Up from HomePod
-                        tracing::info!("Starting PTP slave to sync with receiver at {}", addr);
-                        let ptp_task = tokio::spawn(async move {
-                            match run_ptp_slave(addr, offset_tx).await {
-                                Ok(()) => {
-                                    tracing::info!("PTP slave task completed");
+                        let locked = tokio::time::timeout(
+                            std::time::Duration::from_secs(6),
+                            async {
+                                loop {
+                                    let state = *state_rx.borrow();
+                                    if state.have_clock && state.have_offset {
+                                        return Ok::<FollowClockState, CoreError>(state);
+                                    }
+                                    state_rx.changed().await.map_err(|_| {
+                                        CoreError::Rtsp(RtspError::SetupFailed(
+                                            "PTP follow-receiver task ended before clock lock".into(),
+                                        ))
+                                    })?;
                                 }
-                                Err(e) => {
-                                    tracing::error!("PTP slave task error: {}", e);
-                                }
-                            }
-                        });
+                            },
+                        )
+                        .await
+                        .map_err(|_| CoreError::Rtsp(RtspError::SetupFailed(
+                            "PTP follow-receiver clock lock timed out after SETPEERS".into(),
+                        )))??;
 
-                        self.timing_task = Some(ptp_task);
+                        self.ptp_master_clock_id = Some(locked.clock_id);
+                        self.timing_offset = Some(locked.offset);
 
-                        // Wait a moment for initial sync before proceeding
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-                        // Get the current offset from the channel
-                        let initial_offset = *offset_rx.borrow_and_update();
-                        self.timing_offset = Some(initial_offset);
-
-                        tracing::info!("PTP slave initialized (initial offset: {} ns)", initial_offset.offset_ns);
+                        tracing::info!(
+                            "PTP receiver-clock locked: gm={:02x?}, offset={} ns",
+                            locked.clock_id,
+                            locked.offset.offset_ns
+                        );
                     }
                 }
             }
