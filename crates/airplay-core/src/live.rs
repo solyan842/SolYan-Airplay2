@@ -280,6 +280,7 @@ pub async fn run_live_stream(
     const STARTUP_PRIME_MS: u64 = 450;
     const FEEDBACK_DEGRADED_MISSES: u32 = 3;
     const CAPTURE_RESTART_ATTEMPTS: usize = 6;
+    const RTP_STALL_LIMIT: Duration = Duration::from_secs(3);
     const TRANSITION_MS: u32 = 2;
     const SIGNAL_PEAK_THRESHOLD: u16 = 32;
     const SIGNAL_CONFIRM_PACKETS: u64 = 120;
@@ -592,8 +593,12 @@ pub async fn run_live_stream(
     let mut signal_confirmed = false;
     let mut dropped_chunks = 0u64;
     let mut next_progress = Instant::now() + Duration::from_millis(500);
+    let mut next_health_log = Instant::now() + Duration::from_secs(1);
     let mut next_silence_at = Instant::now() + silence_chunk_period;
     let mut packets_sent = 0u64;
+    let mut last_packet_observed = 0u64;
+    let mut packet_progress_seen = false;
+    let mut last_packet_progress_at = Instant::now();
     let mut retransmit_requested = 0u64;
     let mut retransmit_fulfilled = 0u64;
     let mut underruns = 0u64;
@@ -780,6 +785,7 @@ pub async fn run_live_stream(
         let now = Instant::now();
         if now >= next_progress {
             // Stats are observational; stale values are safer than blocking PCM.
+            let mut stats_fresh = false;
             if let Ok(guard) = client.try_lock() {
                 let stats = guard.stats_snapshot();
                 packets_sent = stats.packets_sent;
@@ -787,6 +793,49 @@ pub async fn run_live_stream(
                 retransmit_fulfilled = stats.rtx_fulfilled;
                 underruns = stats.underruns;
                 loss_percent = stats.loss_percent();
+                stats_fresh = true;
+
+                if !packet_progress_seen {
+                    if packets_sent > 0 {
+                        packet_progress_seen = true;
+                        last_packet_observed = packets_sent;
+                        last_packet_progress_at = now;
+                    }
+                } else if packets_sent > last_packet_observed {
+                    last_packet_observed = packets_sent;
+                    last_packet_progress_at = now;
+                } else if last_packet_progress_at.elapsed() >= RTP_STALL_LIMIT {
+                    tracing::error!(
+                        "RTP HEARTBEAT STALLED: packets_sent={} unchanged for {:.1}s; captured={}, silence={}, queue={}, feedback_streak={}",
+                        packets_sent,
+                        last_packet_progress_at.elapsed().as_secs_f64(),
+                        captured_chunks,
+                        silence_chunks,
+                        sender.queued_frames(),
+                        feedback_timeout_streak.load(Ordering::Acquire)
+                    );
+                    loop_error = Some(anyhow!(
+                        "RTP packet clock stalled at {} packets for {:.1}s",
+                        packets_sent,
+                        last_packet_progress_at.elapsed().as_secs_f64()
+                    ));
+                    break;
+                }
+            }
+
+            if now >= next_health_log {
+                tracing::info!(
+                    "SERVICE HEALTH: captured={}, silence={}, queue={}, packets_sent={}, stats_fresh={}, feedback_streak={}, control_degraded={}, capture_restarts={}",
+                    captured_chunks,
+                    silence_chunks,
+                    sender.queued_frames(),
+                    packets_sent,
+                    stats_fresh,
+                    feedback_timeout_streak.load(Ordering::Acquire),
+                    feedback_degraded.load(Ordering::Acquire),
+                    capture_restarts
+                );
+                next_health_log = now + Duration::from_secs(1);
             }
 
             if !signal_confirmed {
