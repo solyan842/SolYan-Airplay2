@@ -2354,6 +2354,221 @@ pub async fn run_ptp_hold_master_flow(
     }
 }
 
+/// Clock state learned while following a receiver-owned AirPlay timeline.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FollowClockState {
+    pub clock_id: [u8; 8],
+    pub have_clock: bool,
+    pub offset: ClockOffset,
+    pub have_offset: bool,
+}
+
+fn fold_follow_offset(current: Option<i64>, raw: i64) -> i64 {
+    match current {
+        None => raw,
+        Some(old) => {
+            let delta = raw - old;
+            if delta.abs() > 1_000_000 {
+                raw
+            } else {
+                old + delta / 8
+            }
+        }
+    }
+}
+
+/// Follow a receiver-owned gPTP timeline.
+///
+/// This path is for receivers that keep their own grandmaster (observed on
+/// standalone HomePod OS 27). It never advertises our clock to that receiver.
+/// SETPEERS causes the receiver to send Announce/Sync/Follow_Up; we learn its
+/// grandmasterIdentity and local->receiver clock offset, while still answering
+/// peer-delay and unicast-signaling probes required for gPTP asCapable state.
+pub async fn run_ptp_follow_receiver_flow(
+    receiver_ip: std::net::IpAddr,
+    sender_clock_identity: [u8; 8],
+    state_tx: tokio::sync::watch::Sender<FollowClockState>,
+    offset_tx: tokio::sync::watch::Sender<ClockOffset>,
+    ready_tx: tokio::sync::oneshot::Sender<(u16, u16)>,
+) -> Result<()> {
+    let event_socket = bind_airplay_ptp_socket(PTP_EVENT_PORT).await?;
+    let general_socket = bind_airplay_ptp_socket(PTP_GENERAL_PORT).await?;
+    let event_port = event_socket.local_addr()?.port();
+    let general_port = general_socket.local_addr()?.port();
+    let _ = ready_tx.send((event_port, general_port));
+
+    tracing::info!(
+        "AirPlay gPTP follow-receiver ready: receiver={}, UDP {}/{}, sender_id={:02x?}",
+        receiver_ip,
+        event_port,
+        general_port,
+        sender_clock_identity
+    );
+
+    let mut event_buf = [0u8; 512];
+    let mut general_buf = [0u8; 512];
+    let mut clock_id = [0u8; 8];
+    let mut have_clock = false;
+    let mut offset_ns: Option<i64> = None;
+    let mut pending_sync: Option<(u16, u64, i64)> = None;
+
+    loop {
+        tokio::select! {
+            result = event_socket.recv_from(&mut event_buf) => {
+                if let Ok((len, src)) = result {
+                    if src.ip() != receiver_ip || len < 34 {
+                        continue;
+                    }
+                    let rx_ts = PtpTimestamp::now();
+                    let rx_ns = rx_ts.to_nanos() as i64;
+                    let Ok(header) = PtpHeader::parse(&event_buf[..len]) else {
+                        continue;
+                    };
+
+                    match header.message_type {
+                        PtpMessageType::Sync if len >= 44 => {
+                            let correction = read_correction_ns(&event_buf[..len]);
+                            if header.flags & PTP_FLAG_TWO_STEP != 0 {
+                                pending_sync = Some((header.sequence_id, rx_ns as u64, correction));
+                            } else if let Ok(t1) = PtpTimestamp::parse(&event_buf[34..44]) {
+                                let raw = t1.to_nanos() as i64 + correction - rx_ns;
+                                let folded = fold_follow_offset(offset_ns, raw);
+                                offset_ns = Some(folded);
+                                let offset = ClockOffset {
+                                    offset_ns: folded,
+                                    error_ns: 0,
+                                    rtt_ns: 0,
+                                };
+                                let _ = offset_tx.send(offset);
+                                let _ = state_tx.send(FollowClockState {
+                                    clock_id,
+                                    have_clock,
+                                    offset,
+                                    have_offset: true,
+                                });
+                            }
+                        }
+                        PtpMessageType::PdelayReq => {
+                            if let Err(err) = airplay_send_pdelay_resp(
+                                &event_socket,
+                                &general_socket,
+                                src,
+                                &event_buf[..len],
+                                &sender_clock_identity,
+                                rx_ts,
+                            ).await {
+                                tracing::warn!(
+                                    "AirPlay gPTP follow Pdelay response failed: {}",
+                                    err
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            result = general_socket.recv_from(&mut general_buf) => {
+                if let Ok((len, src)) = result {
+                    if src.ip() != receiver_ip || len < 34 {
+                        continue;
+                    }
+                    let Ok(header) = PtpHeader::parse(&general_buf[..len]) else {
+                        continue;
+                    };
+
+                    match header.message_type {
+                        PtpMessageType::Announce if len >= 64 => {
+                            let mut learned = [0u8; 8];
+                            learned.copy_from_slice(&general_buf[53..61]);
+                            if learned != clock_id {
+                                clock_id = learned;
+                                have_clock = true;
+                                offset_ns = None;
+                                pending_sync = None;
+                                tracing::info!(
+                                    "AirPlay gPTP following receiver grandmaster {:02x?}",
+                                    clock_id
+                                );
+                            } else {
+                                have_clock = true;
+                            }
+
+                            let offset = offset_ns
+                                .map(|value| ClockOffset {
+                                    offset_ns: value,
+                                    error_ns: 0,
+                                    rtt_ns: 0,
+                                })
+                                .unwrap_or_default();
+                            let _ = state_tx.send(FollowClockState {
+                                clock_id,
+                                have_clock,
+                                offset,
+                                have_offset: offset_ns.is_some(),
+                            });
+                        }
+
+                        PtpMessageType::FollowUp if len >= 44 => {
+                            if let Some((seq, sync_rx_ns, sync_corr)) = pending_sync {
+                                if seq == header.sequence_id {
+                                    if let Ok(t1) = PtpTimestamp::parse(&general_buf[34..44]) {
+                                        let fup_corr = read_correction_ns(&general_buf[..len]);
+                                        let raw = t1.to_nanos() as i64
+                                            + sync_corr
+                                            + fup_corr
+                                            - sync_rx_ns as i64;
+                                        let folded = fold_follow_offset(offset_ns, raw);
+                                        offset_ns = Some(folded);
+                                        pending_sync = None;
+
+                                        let offset = ClockOffset {
+                                            offset_ns: folded,
+                                            error_ns: 0,
+                                            rtt_ns: 0,
+                                        };
+                                        let _ = offset_tx.send(offset);
+                                        let _ = state_tx.send(FollowClockState {
+                                            clock_id,
+                                            have_clock,
+                                            offset,
+                                            have_offset: true,
+                                        });
+
+                                        if have_clock {
+                                            tracing::debug!(
+                                                "AirPlay gPTP receiver clock lock: gm={:02x?}, offset={}ns",
+                                                clock_id,
+                                                folded
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        PtpMessageType::Signaling => {
+                            if let Err(err) = airplay_handle_unicast_request(
+                                &general_socket,
+                                src,
+                                &general_buf[..len],
+                                &sender_clock_identity,
+                            ).await {
+                                tracing::warn!(
+                                    "AirPlay gPTP follow unicast grant failed: {}",
+                                    err
+                                );
+                            }
+                        }
+
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Background PTP sync task.
 pub async fn ptp_sync_loop(
     client: &mut PtpClient,
