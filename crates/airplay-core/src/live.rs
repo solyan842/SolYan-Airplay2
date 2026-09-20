@@ -54,6 +54,9 @@ impl StreamControl {
 pub struct StreamProgress {
     pub elapsed_secs: f64,
     pub captured_chunks: u64,
+    pub signal_chunks: u64,
+    pub signal_peak: u16,
+    pub signal_confirmed: bool,
     pub silence_chunks: u64,
     pub late_polls: u64,
     pub silence_transitions: u64,
@@ -166,6 +169,8 @@ pub async fn run_live_stream(
     const ACTIVE_POLL: Duration = Duration::from_millis(20);
     const SILENCE_GRACE: Duration = Duration::from_millis(120);
     const TRANSITION_MS: u32 = 2;
+    const SIGNAL_PEAK_THRESHOLD: u16 = 32;
+    const SIGNAL_CONFIRM_PACKETS: u64 = 120;
 
     let mut stream_config = StreamConfig::default();
     if render_delay_ms == 0 {
@@ -255,8 +260,27 @@ pub async fn run_live_stream(
     }
 
     match mode {
-        LiveStreamMode::Single => client.start_live_streaming_with_decoder(decoder).await?,
+        LiveStreamMode::Single => {
+            client.start_live_streaming_with_decoder(decoder).await?;
+
+            // Upstream single-device live startup sends FLUSH immediately before
+            // starting the streamer but does not re-issue RECORD afterwards.
+            // Some Apple receivers tolerate that stale state and some do not,
+            // producing the observed "connected/packets sent but silent" startup.
+            // Re-arm deterministically through the public pause/resume path:
+            // pause => FLUSH + marker reset, resume => RECORD.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                client.pause().await?;
+                client.resume().await?;
+                Ok::<(), anyhow::Error>(())
+            })
+            .await
+            .map_err(|_| anyhow!("AirPlay FLUSH/RECORD re-arm timed out"))??;
+
+            tracing::info!("Single-device AirPlay stream re-armed with FLUSH -> RECORD");
+        }
         LiveStreamMode::MultiroomExperimental => {
+            // Group startup already performs FLUSH -> RECORD for every member.
             client.start_live_streaming_to_group(decoder).await?
         }
     }
@@ -314,6 +338,10 @@ pub async fn run_live_stream(
 
     let started = Instant::now();
     let mut captured_chunks = 0u64;
+    let mut signal_chunks = 0u64;
+    let mut signal_peak = 0u16;
+    let mut first_signal_packet_baseline: Option<u64> = None;
+    let mut signal_confirmed = false;
     let mut dropped_chunks = 0u64;
     let mut late_polls = 0u64;
     let mut silence_transitions = 0u64;
@@ -342,6 +370,11 @@ pub async fn run_live_stream(
         match captured {
             Some(chunk) => {
                 let mut samples = chunk.samples;
+                let chunk_peak = samples
+                    .iter()
+                    .map(|sample| sample.unsigned_abs())
+                    .max()
+                    .unwrap_or(0);
 
                 if in_silence {
                     fade_in_from_zero(
@@ -367,6 +400,18 @@ pub async fn run_live_stream(
 
                 if sender.send(frame) {
                     captured_chunks += 1;
+                    if chunk_peak > SIGNAL_PEAK_THRESHOLD {
+                        signal_chunks += 1;
+                        signal_peak = signal_peak.max(chunk_peak);
+                        if first_signal_packet_baseline.is_none() {
+                            first_signal_packet_baseline = Some(packets_sent);
+                            tracing::info!(
+                                "First non-silent PCM queued: peak={}, packet_baseline={}",
+                                chunk_peak,
+                                packets_sent
+                            );
+                        }
+                    }
                     last_real_at = Some(Instant::now());
                 } else {
                     dropped_chunks += 1;
@@ -454,10 +499,25 @@ pub async fn run_live_stream(
                 loss_percent = stats.loss_percent();
             }
 
+            if !signal_confirmed {
+                if let Some(baseline) = first_signal_packet_baseline {
+                    if packets_sent.saturating_sub(baseline) >= SIGNAL_CONFIRM_PACKETS {
+                        signal_confirmed = true;
+                        tracing::info!(
+                            "Non-silent PCM has cleared startup prebuffer/render lead: packets_advanced={}",
+                            packets_sent.saturating_sub(baseline)
+                        );
+                    }
+                }
+            }
+
             if let Some(tx) = &progress_tx {
                 let _ = tx.try_send(StreamProgress {
                     elapsed_secs: started.elapsed().as_secs_f64(),
                     captured_chunks,
+                    signal_chunks,
+                    signal_peak,
+                    signal_confirmed,
                     silence_chunks,
                     late_polls,
                     silence_transitions,
