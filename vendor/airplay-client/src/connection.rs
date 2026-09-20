@@ -34,12 +34,18 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::net::TcpStream;
 
-/// Generate a random MAC-like sender ID.
+/// Generate the native-AirPlay sender identity from eight random bytes.
+///
+/// Apple native AP2 derives the 16-hex DACP-ID, 8-byte deviceID and 64-bit
+/// PTP ClockID from one identity. Keep that width natively instead of starting
+/// from the old 48-bit RAOP-style MAC form.
 fn generate_device_id() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
     format!(
-        "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+        "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+        rng.gen::<u8>(),
+        rng.gen::<u8>(),
         rng.gen::<u8>(),
         rng.gen::<u8>(),
         rng.gen::<u8>(),
@@ -65,14 +71,31 @@ fn normalize_sender_device_id(value: &str) -> Option<String> {
         .filter(|c| c.is_ascii_hexdigit())
         .collect::<String>()
         .to_uppercase();
-    if hex.len() != 12 {
+
+    let native = if hex.len() == 16 {
+        hex
+    } else if hex.len() == 12 {
+        // One-time migration from the pre-v0.2.21 48-bit sender ID.
+        // Convert it deterministically to EUI-64 so an existing install does
+        // not churn identity again merely because the new code is installed.
+        format!(
+            "{:02X}{}FFFE{}",
+            u8::from_str_radix(&hex[0..2], 16).ok()? ^ 0x02,
+            &hex[2..6],
+            &hex[6..12]
+        )
+    } else {
         return None;
-    }
-    Some(format!(
-        "{}:{}:{}:{}:{}:{}",
-        &hex[0..2], &hex[2..4], &hex[4..6],
-        &hex[6..8], &hex[8..10], &hex[10..12]
-    ))
+    };
+
+    Some(
+        native
+            .as_bytes()
+            .chunks(2)
+            .map(|chunk| std::str::from_utf8(chunk).ok())
+            .collect::<Option<Vec<_>>>()?
+            .join(":"),
+    )
 }
 
 /// One stable DACP/device identity for the whole SolYan sender.
@@ -84,6 +107,11 @@ fn stable_sender_device_id() -> String {
     let path = sender_device_id_file();
     if let Ok(existing) = fs::read_to_string(&path) {
         if let Some(id) = normalize_sender_device_id(&existing) {
+            let existing_trimmed = existing.trim();
+            if !existing_trimmed.eq_ignore_ascii_case(&id) {
+                let _ = fs::write(&path, format!("{}\n", id));
+                info!("Migrated SolYan sender identity to native 64-bit DACP form");
+            }
             return id;
         }
     }
