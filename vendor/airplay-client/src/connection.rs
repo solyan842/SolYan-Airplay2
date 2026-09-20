@@ -833,8 +833,18 @@ impl Connection {
         // establish the session/events/control plane, issue RECORD on the
         // session URL, then register the audio stream with SETUP phase 2.
         // Do not FLUSH a brand-new session: FLUSH is for an existing timeline.
-        tracing::info!("Sending initial RECORD before audio stream SETUP");
-        self.send_record().await?;
+        tracing::info!("Sending bare initial RECORD before audio stream SETUP");
+        let initial_record = RtspRequest::record(self.session.request_uri());
+        let record_resp = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            self.rtsp.send(initial_record),
+        )
+        .await
+        .map_err(|_| CoreError::Timeout)??;
+        if record_resp.status_code != 200 {
+            return Err(CoreError::Rtsp(RtspError::UnexpectedStatus(record_resp.status_code)));
+        }
+        tracing::info!("Initial RECORD acknowledged");
 
         // SETUP Phase 2 (audio stream)
         let setup2_body = self.session.build_setup_phase2()?;
